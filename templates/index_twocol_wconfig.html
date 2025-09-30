@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Device Control Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f7f7f7;
+    }
+    h2 {
+      margin-bottom: 5px;
+    }
+    .device {
+      border: 1px solid #ccc;
+      padding: 15px;
+      margin-bottom: 20px;
+      background: #fff;
+      border-radius: 8px;
+      min-height: 350px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .device-buttons {
+      display: flex;
+      align-items: flex-start;
+      margin-bottom: 10px;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .config-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    button {
+      padding: 10px 20px;
+      margin: 5px 0;
+      border: none;
+      border-radius: 5px;
+      background: #007BFF;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    input[type="number"], input[type="text"] {
+      margin-top: 5px;
+      padding: 5px;
+      width: 120px;
+    }
+    .log {
+      border: 1px solid #ccc;
+      background: #fafafa;
+      height: 150px;
+      overflow-y: auto;
+      padding: 5px;
+      font-family: monospace;
+      white-space: pre-wrap;
+    }
+    .dashboard {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(300px, 700px));
+      gap: 20px;
+      justify-content: center;
+    }
+    .column {
+      display: flex;
+      flex-direction: column;
+    }
+  </style>
+</head>
+<body>
+  <h1>Device Control Dashboard</h1>
+  <div class="dashboard">
+    <div id="cmd-devices" class="column"></div>
+    <div id="stat-devices" class="column"></div>
+
+
+    <div class="full-width">
+        <h4>Load Configuration JSON</h4>
+        <input type="text" id="configFilePath" placeholder="/path/to/config.json" style="width:450px">
+        <button id="loadConfigBtn">Load Config</button>
+    </div>
+
+    <div class="full-width" id="configEditor" style="display:none;">
+      <h4>Edit Configuration</h4>
+      <form id="configForm"></form>
+      <button type="button" id="updateConfigBtn">UpdateConfig</button>
+    </div>
+    </div>
+    <div class="full-width">
+        <h4>Server Log</h4>
+        <div id="serverLog" style="background:#f0f0f0; border:1px solid #ccc; height:200px; overflow:auto; padding:5px; font-family:monospace;"></div>
+    </div>
+
+
+<script>
+const socket = io();
+const cmdDevicesDiv = document.getElementById("cmd-devices");
+const statDevicesDiv = document.getElementById("stat-devices");
+
+// Devices injected from Flask render_template
+const devices = {{ devices|tojson }};
+
+// --- Render devices ---
+devices.forEach(({ name, title }) => {
+  const div = document.createElement("div");
+  div.className = "device";
+
+  const h2 = document.createElement("h2");
+  h2.textContent = title;
+  div.appendChild(h2);
+
+  const btnContainer = document.createElement("div");
+  btnContainer.className = "device-buttons";
+  div.appendChild(btnContainer);
+
+  const configContainer = document.createElement("div");
+  configContainer.className = "config-container";
+
+  if (name === "DaemonCmd") {
+    ["Start DAQ", "Stop DAQ", "Status"].forEach(label => {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.onclick = () => sendCommand(name, label.replace(' ', '_').toUpperCase());
+      btnContainer.appendChild(btn);
+    });
+  } else if (name.endsWith("Cmd")) {
+    // --- Single-value configure ---
+    const configBtn = document.createElement("button");
+    configBtn.textContent = "CONFIGURE (Remote Config)";
+    configBtn.onclick = () => {
+        const value = document.getElementById(`config-value-${name}`).value;
+        sendCommand(name, "CONFIGURE", value);
+    };
+    configContainer.appendChild(configBtn);
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.placeholder = "Enter value";
+    input.id = `config-value-${name}`;
+    configContainer.appendChild(input);
+
+    // --- Full-config configure (only for TPCReadoutCmd) ---
+    if (name === "TPCReadoutCmd") {
+      const fullConfigBtn = document.createElement("button");
+      fullConfigBtn.textContent = "CONFIGURE (Send Config)";
+      fullConfigBtn.onclick = () => {
+          if (Object.keys(loadedConfig).length === 0) {
+            alert("No config loaded yet!");
+            return;
+          }
+          sendCommand(name, "CONFIGURE", loadedConfig);
+          appendLog(`Sent full config to ${name}`);
+      };
+      configContainer.appendChild(fullConfigBtn);
+    }
+
+    btnContainer.appendChild(configContainer);
+
+    ["RUN", "STOP", "RESET"].forEach(label => {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.onclick = () => sendCommand(name, label);
+      btnContainer.appendChild(btn);
+    });
+  }
+
+  const logDiv = document.createElement("div");
+  logDiv.className = "log";
+  logDiv.id = `log-${name}`;
+  div.appendChild(logDiv);
+
+  if (name.endsWith("Cmd")) cmdDevicesDiv.appendChild(div);
+  else statDevicesDiv.appendChild(div);
+});
+
+// --- Send command helper ---
+function sendCommand(device, cmd, value=null) {
+  socket.emit("send_command", { device, cmd, value });
+}
+
+// --- Server log ---
+function appendLog(message) {
+  const logDiv = document.getElementById("serverLog");
+  const time = new Date().toLocaleTimeString();
+  logDiv.innerHTML += `[${time}] ${message}<br>`;
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+// --- Command responses ---
+socket.on("command_response", data => {
+  const logDiv = document.getElementById(`log-${data.device}`);
+  const message = `CMD=${data.command} ARGS=${JSON.stringify(data.args)}`;
+  if (logDiv) {
+    logDiv.textContent += `[${data.timestamp}] ${message}\n`;
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+  appendLog(`${data.device} - ${message}`);
+});
+
+// --- Config load / edit ---
+let loadedConfig = {};
+
+function flattenConfig(obj, prefix='') {
+  const result = {};
+  for (const key in obj) {
+    const value = obj[key];
+    const newKey = prefix ? `${prefix}.${key}` : key;
+    if (typeof value === 'object' && !Array.isArray(value)) {
+      Object.assign(result, flattenConfig(value, newKey));
+    } else {
+      result[newKey] = value;
+    }
+  }
+  return result;
+}
+
+function unflattenConfig(flatObj) {
+  const result = {};
+  for (const flatKey in flatObj) {
+    const keys = flatKey.split('.');
+    let cur = result;
+    keys.forEach((k, idx) => {
+      if (idx === keys.length - 1) cur[k] = flatObj[flatKey];
+      else { cur[k] = cur[k] || {}; cur = cur[k]; }
+    });
+  }
+  return result;
+}
+
+document.getElementById('loadConfigBtn').addEventListener('click', () => {
+  const path = document.getElementById('configFilePath').value;
+  if(!path) { alert("Enter a file path first!"); return; }
+  socket.emit('load_config_file', {path});
+});
+
+socket.on('config_loaded', (data) => {
+  loadedConfig = data;
+  appendLog(`Config loaded successfully from server file.`);
+  const flatConfig = flattenConfig(loadedConfig);
+  const form = document.getElementById('configForm');
+  form.innerHTML = '';
+  for (const key in flatConfig) {
+    const value = Array.isArray(flatConfig[key]) ? flatConfig[key].join(',') : flatConfig[key];
+    form.innerHTML += `<div><label>${key}:</label>
+      <input type="text" name="${key}" value="${value}" style="width:200px"></div>`;
+  }
+  document.getElementById('configEditor').style.display = 'block';
+});
+
+document.getElementById('updateConfigBtn').addEventListener('click', () => {
+  const form = document.getElementById('configForm');
+  const flatUpdated = {};
+  for (const element of form.elements) {
+    if (element.name) {
+      if (element.value.includes(',')) flatUpdated[element.name] = element.value.split(',').map(x => parseInt(x));
+      else if (!isNaN(parseInt(element.value))) flatUpdated[element.name] = parseInt(element.value);
+      else flatUpdated[element.name] = element.value;
+    }
+  }
+  const updatedConfig = unflattenConfig(flatUpdated);
+  socket.emit('update_config', updatedConfig);
+  appendLog(`Updated config..`);
+});
+
+</script>
+</body>
+</html>
+
+
