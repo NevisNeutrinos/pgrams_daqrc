@@ -85,14 +85,16 @@
 
     <div class="full-width">
         <h4>Load Configuration JSON</h4>
-        <input type="text" id="configFilePath" placeholder="/path/to/config.json" style="width:450px">
+<!--        <input type="text" id="configFilePath" placeholder="/path/to/config.json" style="width:450px">-->
+        <input type="text" id="configDirPath" placeholder="/path/to/config/folder" style="width:100%;">
+        <input type="text" id="configFileName" placeholder="config.json" style="width:100%;">
         <button id="loadConfigBtn">Load Config</button>
     </div>
 
     <div class="full-width" id="configEditor" style="display:none;">
       <h4>Edit Configuration</h4>
       <form id="configForm"></form>
-      <button type="button" id="updateConfigBtn">UpdateConfig</button>
+      <button type="button" id="updateConfigBtn">Update Config</button>
     </div>
     </div>
     <div class="full-width">
@@ -237,9 +239,14 @@ function unflattenConfig(flatObj) {
 }
 
 document.getElementById('loadConfigBtn').addEventListener('click', () => {
-  const path = document.getElementById('configFilePath').value;
-  if(!path) { alert("Enter a file path first!"); return; }
-  socket.emit('load_config_file', {path});
+    const dir = document.getElementById('configDirPath').value;
+    const file = document.getElementById('configFileName').value;
+    if (!dir || !file) {
+        alert("Enter both a directory and a filename!");
+        return;
+    }
+    const path = dir.endsWith("/") ? dir + file : dir + "/" + file;
+    socket.emit('load_config_file', {path: path});
 });
 
 socket.on('config_loaded', (data) => {
@@ -247,12 +254,75 @@ socket.on('config_loaded', (data) => {
   appendLog(`Config loaded successfully from server file.`);
   const flatConfig = flattenConfig(loadedConfig);
   const form = document.getElementById('configForm');
-  form.innerHTML = '';
-  for (const key in flatConfig) {
-    const value = Array.isArray(flatConfig[key]) ? flatConfig[key].join(',') : flatConfig[key];
-    form.innerHTML += `<div><label>${key}:</label>
-      <input type="text" name="${key}" value="${value}" style="width:200px"></div>`;
-  }
+  // form.innerHTML = '';
+  // for (const key in flatConfig) {
+  //   const value = Array.isArray(flatConfig[key]) ? flatConfig[key].join(',') : flatConfig[key];
+  //   // form.innerHTML += `<div><label>${key}:</label>
+  //   //   <input type="text" name="${key}" value="${value}" style="width:200px"></div>`;
+  //   form.innerHTML += `
+  //       <div style="display:flex; align-items:center; margin-bottom:6px;">
+  //           <label style="display:inline-block; width:250px; font-weight:500;">${key}:</label>
+  //           <input type="text" name="${key}" value="${value}" style="flex:1; max-width:200px;">
+  //       </div>`;
+  // }
+    form.innerHTML = ""; // clear old form first
+
+    Object.keys(flatConfig).forEach(key => {
+      const value = Array.isArray(flatConfig[key]) ? flatConfig[key].join(',') : flatConfig[key];
+
+      // Create wrapper
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.marginBottom = "6px";
+
+      // Label
+      const label = document.createElement("label");
+      label.textContent = key + ":";
+      label.style.display = "inline-block";
+      label.style.width = "250px";
+      label.style.fontWeight = "500";
+      row.appendChild(label);
+
+      // Input
+      const input = document.createElement("input");
+      input.type = "text";
+      input.name = key;
+      input.value = value;
+      input.style.flex = "1";
+      input.style.maxWidth = "200px";
+
+      // Store original value
+      input.dataset.original = value;
+
+      // Attach change detection
+      input.addEventListener("input", () => {
+        checkForChanges();
+      });
+
+      row.appendChild(input);
+      form.appendChild(row);
+    });
+
+    function checkForChanges() {
+      const inputs = form.querySelectorAll("input");
+      let changed = false;
+      inputs.forEach(input => {
+        if (input.value !== input.dataset.original) {
+          changed = true;
+        }
+      });
+
+      const updateBtn = document.getElementById("updateConfigBtn");
+      if (changed) {
+        updateBtn.style.backgroundColor = "red";
+        updateBtn.style.color = "white";
+      } else {
+        updateBtn.style.backgroundColor = "";
+        updateBtn.style.color = "";
+      }
+    }
+
   document.getElementById('configEditor').style.display = 'block';
 });
 
@@ -268,8 +338,20 @@ document.getElementById('updateConfigBtn').addEventListener('click', () => {
   }
   const updatedConfig = unflattenConfig(flatUpdated);
   socket.emit('update_config', updatedConfig);
+  // Reset "original" values since config is now up-to-date
+  for (const element of form.elements) {
+    if (element.name) {
+      element.dataset.original = element.value;
+    }
+  }
+  // Reset button color
+  const updateBtn = document.getElementById("updateConfigBtn");
+  updateBtn.style.backgroundColor = "";
+  updateBtn.style.color = "";
+
   appendLog(`Updated config..`);
 });
+
 
 </script>
 </body>

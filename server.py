@@ -98,9 +98,7 @@ def handle_command(device_name, command_name, sid, value=None):
             socketio.emit(
                 'command_response',
                 {'device': device_name, "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        'command': recv_cmd, 'args': recv_args},
-                room=sid
-            )
+                        'command': recv_cmd, 'args': recv_args}, room=sid)
         sleep(0.5)
 @app.route('/')
 def index():
@@ -125,6 +123,7 @@ def on_update_config(new_config):
     sid = request.sid
     config_mgr.update_from_dict(new_config)
     updated_dict = config_mgr.get_config()
+    print("Updated config: ", updated_dict)
     emit("command_response", {'device': 'SERVER', 'command': 'INFO', 'args': f'Updated config {updated_dict}'}, room=sid)
 
 @socketio.on('send_command')

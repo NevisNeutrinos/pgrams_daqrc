@@ -35,4 +35,4 @@ class ConfigManager:
         return self.config.serialize()
 
     def get_config(self):
-        return self.config
+        return self.config_dict
