@@ -124,55 +124,130 @@ devices.forEach(({ name, title }) => {
   btnContainer.className = "device-buttons";
   div.appendChild(btnContainer);
 
-  const configContainer = document.createElement("div");
-  configContainer.className = "config-container";
-
   if (name === "DaemonCmd") {
-    ["Start DAQ", "Stop DAQ", "Status"].forEach(label => {
+    ["Start DAQ", "Stop DAQ", "Start Status", "Stop Status"].forEach(label => {
       const btn = document.createElement("button");
       btn.textContent = label;
       btn.onclick = () => sendCommand(name, label.replace(' ', '_').toUpperCase());
       btnContainer.appendChild(btn);
     });
   } else if (name.endsWith("Cmd")) {
-    // --- Single-value configure ---
-    const configBtn = document.createElement("button");
-    configBtn.textContent = "CONFIGURE (Remote Config)";
-    configBtn.onclick = () => {
-        const value = document.getElementById(`config-value-${name}`).value;
-        sendCommand(name, "CONFIGURE", value);
-    };
-    configContainer.appendChild(configBtn);
 
-    const input = document.createElement("input");
-    input.type = "number";
-    input.placeholder = "Enter value";
-    input.id = `config-value-${name}`;
-    configContainer.appendChild(input);
+    const configContainer = document.createElement("div");
+    configContainer.className = "config-container";
 
-    // --- Full-config configure (only for TPCReadoutCmd) ---
+    // --- First row (Send + Run/Stop/Reset) ---
+    const topRow = document.createElement("div");
+    topRow.style.display = "flex";
+    topRow.style.alignItems = "center";
+    topRow.style.gap = "10px";
+
     if (name === "TPCReadoutCmd") {
       const fullConfigBtn = document.createElement("button");
-      fullConfigBtn.textContent = "CONFIGURE (Send Config)";
+      fullConfigBtn.textContent = "CONFIGURE (Send)";
       fullConfigBtn.onclick = () => {
-          if (Object.keys(loadedConfig).length === 0) {
-            alert("No config loaded yet!");
-            return;
-          }
-          sendCommand(name, "CONFIGURE", loadedConfig);
-          appendLog(`Sent full config to ${name}`);
+        if (Object.keys(loadedConfig).length === 0) {
+          alert("No config loaded yet!");
+          return;
+        }
+        sendCommand(name, "CONFIGURE", loadedConfig);
+        appendLog(`Sent full config to ${name}`);
       };
-      configContainer.appendChild(fullConfigBtn);
+      topRow.appendChild(fullConfigBtn);
     }
-
-    btnContainer.appendChild(configContainer);
 
     ["RUN", "STOP", "RESET"].forEach(label => {
       const btn = document.createElement("button");
       btn.textContent = label;
       btn.onclick = () => sendCommand(name, label);
-      btnContainer.appendChild(btn);
+      topRow.appendChild(btn);
     });
+
+    configContainer.appendChild(topRow);
+
+    // --- Second row (Remote config input + button) ---
+    const bottomRow = document.createElement("div");
+    bottomRow.style.display = "flex";
+    bottomRow.style.alignItems = "center";
+    bottomRow.style.gap = "10px";
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.placeholder = "Enter value";
+    input.id = `config-value-${name}`;
+    bottomRow.appendChild(input);
+
+    const configBtn = document.createElement("button");
+    configBtn.textContent = (name === "TPCReadoutCmd") ? "CONFIGURE (Remote)" : "CONFIGURE";
+    configBtn.onclick = () => {
+      const value = document.getElementById(`config-value-${name}`).value;
+      sendCommand(name, "CONFIGURE", value);
+    };
+    bottomRow.appendChild(configBtn);
+
+    configContainer.appendChild(bottomRow);
+
+    // --- Add the container to the device panel ---
+    btnContainer.appendChild(configContainer);
+
+    // const configContainer = document.createElement("div");
+    // configContainer.className = "config-container";
+    //
+    // // container for config-related controls
+    // const configRow = document.createElement("div");
+    // configRow.style.display = "flex";
+    // configRow.style.alignItems = "left";
+    // configRow.style.gap = "10px";
+    // // --- Full-config configure (only for TPCReadoutCmd) ---
+    // if (name === "TPCReadoutCmd") {
+    //   const fullConfigBtn = document.createElement("button");
+    //   fullConfigBtn.textContent = "CONFIGURE (Send)";
+    //   fullConfigBtn.onclick = () => {
+    //       if (Object.keys(loadedConfig).length === 0) {
+    //         alert("No config loaded yet!");
+    //         return;
+    //       }
+    //       sendCommand(name, "CONFIGURE", loadedConfig);
+    //       appendLog(`Sent full config to ${name}`);
+    //   };
+    //   configContainer.appendChild(fullConfigBtn);
+    //
+    //     // --- Single-value configure ---
+    //     const configBtn = document.createElement("button");
+    //     configBtn.textContent = "CONFIGURE (Remote)";
+    //     configBtn.onclick = () => {
+    //         const value = document.getElementById(`config-value-${name}`).value;
+    //         sendCommand(name, "CONFIGURE", value);
+    //     };
+    //     // configContainer.appendChild(configBtn);
+    //      configRow.appendChild(configBtn);
+    // } else {
+    //     // --- Single-value configure ---
+    //     const configBtn = document.createElement("button");
+    //     configBtn.textContent = "CONFIGURE";
+    //     configBtn.onclick = () => {
+    //         const value = document.getElementById(`config-value-${name}`).value;
+    //         sendCommand(name, "CONFIGURE", value);
+    //     };
+    //     // configContainer.appendChild(configBtn);
+    //     configRow.appendChild(configBtn);
+    // }
+    // // -- The box to take in the config number for the remote config --
+    // const input = document.createElement("input");
+    // input.type = "number";
+    // input.placeholder = "Enter value";
+    // input.id = `config-value-${name}`;
+    //
+    // configRow.appendChild(input);
+    // configContainer.appendChild(configRow);
+    // btnContainer.appendChild(configContainer);
+    //
+    // ["RUN", "STOP", "RESET"].forEach(label => {
+    //   const btn = document.createElement("button");
+    //   btn.textContent = label;
+    //   btn.onclick = () => sendCommand(name, label);
+    //   btnContainer.appendChild(btn);
+    // });
   }
 
   const logDiv = document.createElement("div");
@@ -254,17 +329,6 @@ socket.on('config_loaded', (data) => {
   appendLog(`Config loaded successfully from server file.`);
   const flatConfig = flattenConfig(loadedConfig);
   const form = document.getElementById('configForm');
-  // form.innerHTML = '';
-  // for (const key in flatConfig) {
-  //   const value = Array.isArray(flatConfig[key]) ? flatConfig[key].join(',') : flatConfig[key];
-  //   // form.innerHTML += `<div><label>${key}:</label>
-  //   //   <input type="text" name="${key}" value="${value}" style="width:200px"></div>`;
-  //   form.innerHTML += `
-  //       <div style="display:flex; align-items:center; margin-bottom:6px;">
-  //           <label style="display:inline-block; width:250px; font-weight:500;">${key}:</label>
-  //           <input type="text" name="${key}" value="${value}" style="flex:1; max-width:200px;">
-  //       </div>`;
-  // }
     form.innerHTML = ""; // clear old form first
 
     Object.keys(flatConfig).forEach(key => {

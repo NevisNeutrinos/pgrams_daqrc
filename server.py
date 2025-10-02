@@ -1,4 +1,6 @@
 import eventlet
+import numpy as np
+
 eventlet.monkey_patch()  # patch standard library for concurrency
 
 import json
@@ -9,11 +11,13 @@ from threading import Thread
 from time import sleep
 from config_manager import ConfigManager
 from network_module import IOContext, TCPConnection, Command
+from datamon import DaqCompMonitor
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 config_mgr = ConfigManager()
+daq_metrics = DaqCompMonitor()
 
 """
   Multiple TCP connections globals
@@ -42,7 +46,8 @@ devices["DaemonStat"].run_ctx(io_context)
 
 # Map GUI buttons to commands
 command_map = {
-    "STATUS": 0x0,
+    "START_STATUS": 0x0,
+    "STOP_STATUS": 0x3,
     "START_DAQ": 0x1,
     "STOP_DAQ": 0x2,
     "RESET": 0x0,
@@ -58,10 +63,18 @@ def stream_device(device_name):
         cmd_list = tcp_conn.read_recv_buffer(1000)
         if cmd_list:
             for cmd in cmd_list:
-                socketio.emit(
-                    "command_response",
+                if device_name == "DaemonStat":
+                    daq_metrics.deserialize(cmd.arguments)
+                    payload = daq_metrics.get_metric_dict()
+                    for k, v in payload.items():
+                        if type(v) is np.ndarray:
+                            payload[k] = v.tolist()
+                else:
+                    payload = cmd.arguments
+
+                socketio.emit("command_response",
                     {"device": device_name, "timestamp": datetime.now().strftime("%H:%M:%S"),
-                            "command": cmd.command, "args": cmd.arguments},
+                            "command": cmd.command, "args": payload}
                 )
         eventlet.sleep(0.5)  # non-blocking sleep for eventlet
 
