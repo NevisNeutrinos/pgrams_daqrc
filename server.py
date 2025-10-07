@@ -11,7 +11,7 @@ from threading import Thread
 from time import sleep
 from config_manager import ConfigManager
 from network_module import IOContext, TCPConnection, Command
-from datamon import DaqCompMonitor
+from datamon import DaqCompMonitor, CommCodes
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
@@ -44,16 +44,16 @@ devices = {device_name: TCPConnection(io_context, "127.0.0.1", device_dict[devic
            }
 devices["DaemonStat"].run_ctx(io_context)
 
-# Map GUI buttons to commands
+# Map GUI buttons to communication codes
 command_map = {
-    "START_STATUS": 0x0,
-    "STOP_STATUS": 0x3,
-    "START_DAQ": 0x1,
-    "STOP_DAQ": 0x2,
-    "RESET": 0x0,
-    "CONFIGURE": 0x1,
-    "RUN": 0x2,
-    "STOP": 0x3
+    "START_STATUS": int(CommCodes.OrcStartComputerStatus),
+    "STOP_STATUS": int(CommCodes.OrcStopComputerStatus),
+    "START_ALL_DAQ": int(CommCodes.OrcBootAllDaq),
+    "SHUTDOWN_ALL_DAQ": int(CommCodes.OrcShutdownAllDaq),
+    "RESET": int(CommCodes.ColResetRun),
+    "CONFIGURE": int(CommCodes.ColConfigure),
+    "START_RUN": int(CommCodes.ColStartRun),
+    "STOP_RUN": int(CommCodes.ColStopRun)
 }
 
 def stream_device(device_name):

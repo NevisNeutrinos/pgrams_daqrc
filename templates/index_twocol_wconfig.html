@@ -125,10 +125,10 @@ devices.forEach(({ name, title }) => {
   div.appendChild(btnContainer);
 
   if (name === "DaemonCmd") {
-    ["Start DAQ", "Stop DAQ", "Start Status", "Stop Status"].forEach(label => {
+    ["Start All DAQ", "Shutdown All DAQ", "Start Status", "Stop Status"].forEach(label => {
       const btn = document.createElement("button");
       btn.textContent = label;
-      btn.onclick = () => sendCommand(name, label.replace(' ', '_').toUpperCase());
+      btn.onclick = () => sendCommand(name, label.replace(/ /g, '_').toUpperCase());
       btnContainer.appendChild(btn);
     });
   } else if (name.endsWith("Cmd")) {
@@ -144,22 +144,22 @@ devices.forEach(({ name, title }) => {
 
     if (name === "TPCReadoutCmd") {
       const fullConfigBtn = document.createElement("button");
-      fullConfigBtn.textContent = "CONFIGURE (Send)";
+      fullConfigBtn.textContent = "Configure (Send)";
       fullConfigBtn.onclick = () => {
         if (Object.keys(loadedConfig).length === 0) {
           alert("No config loaded yet!");
           return;
         }
-        sendCommand(name, "CONFIGURE", loadedConfig);
+        sendCommand(name, "Configure".replace(' ', '_').toUpperCase(), loadedConfig);
         appendLog(`Sent full config to ${name}`);
       };
       topRow.appendChild(fullConfigBtn);
     }
 
-    ["RUN", "STOP", "RESET"].forEach(label => {
+    ["Start Run", "Stop Run", "Reset"].forEach(label => {
       const btn = document.createElement("button");
       btn.textContent = label;
-      btn.onclick = () => sendCommand(name, label);
+      btn.onclick = () => sendCommand(name, label.replace(' ', '_').toUpperCase());
       topRow.appendChild(btn);
     });
 
@@ -178,10 +178,10 @@ devices.forEach(({ name, title }) => {
     bottomRow.appendChild(input);
 
     const configBtn = document.createElement("button");
-    configBtn.textContent = (name === "TPCReadoutCmd") ? "CONFIGURE (Remote)" : "CONFIGURE";
+    configBtn.textContent = (name === "TPCReadoutCmd") ? "Configure (Remote)" : "Configure";
     configBtn.onclick = () => {
       const value = document.getElementById(`config-value-${name}`).value;
-      sendCommand(name, "CONFIGURE", value);
+      sendCommand(name, "Configure".replace(' ', '_').toUpperCase(), value);
     };
     bottomRow.appendChild(configBtn);
 
