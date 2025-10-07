@@ -11,13 +11,14 @@ from threading import Thread
 from time import sleep
 from config_manager import ConfigManager
 from network_module import IOContext, TCPConnection, Command
-from datamon import DaqCompMonitor, CommCodes
+from datamon import DaqCompMonitor, TpcReadoutMonitor, CommCodes
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 config_mgr = ConfigManager()
 daq_metrics = DaqCompMonitor()
+tpc_readout_metrics = TpcReadoutMonitor()
 
 """
   Multiple TCP connections globals
@@ -56,6 +57,12 @@ command_map = {
     "STOP_RUN": int(CommCodes.ColStopRun)
 }
 
+def prepare_metric_dict(metric_dict):
+    for k, v in metric_dict.items():
+        if type(v) is np.ndarray:
+            metric_dict[k] = v.tolist()
+    return metric_dict
+
 def stream_device(device_name):
     """Continuously read from a TCP connection and emit received commands."""
     tcp_conn = devices[device_name]
@@ -65,10 +72,10 @@ def stream_device(device_name):
             for cmd in cmd_list:
                 if device_name == "DaemonStat":
                     daq_metrics.deserialize(cmd.arguments)
-                    payload = daq_metrics.get_metric_dict()
-                    for k, v in payload.items():
-                        if type(v) is np.ndarray:
-                            payload[k] = v.tolist()
+                    payload = prepare_metric_dict(daq_metrics.get_metric_dict())
+                elif device_name == "TPCReadoutStat":
+                    tpc_readout_metrics.deserialize(cmd.arguments)
+                    payload = prepare_metric_dict(tpc_readout_metrics.get_metric_dict())
                 else:
                     payload = cmd.arguments
 
