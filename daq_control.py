@@ -10,8 +10,11 @@ from flask_socketio import SocketIO, emit
 from threading import Thread
 from time import sleep
 from config_manager import ConfigManager
-from network_module import IOContext, TCPConnection, Command
+from fake_hub import FakeHub
+# from network_module import IOContext, TCPConnection, Command
+from network_module import Command
 from datamon import DaqCompMonitor, TpcReadoutMonitor, CommCodes
+
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
@@ -21,29 +24,13 @@ daq_metrics = DaqCompMonitor()
 tpc_readout_metrics = TpcReadoutMonitor()
 
 """
-  Multiple TCP connections globals
+  Make the TCP connections. 
 """
+fake_hub = FakeHub()
+fake_hub.start_connection()
+devices = fake_hub.get_devices()
+device_title = fake_hub.get_device_names()
 
-# The connections and their ports
-device_dict = {
-    "DaemonStat": 50000,
-    "DaemonCmd": 50001,
-    "TPCReadoutStat": 50002,
-    "TPCReadoutCmd": 50003,
-}
-
-device_title = [
-        {'name': device_name, 'title': device_name + " [" + str(device_dict[device_name]) + "]"}
-         for device_name in device_dict
-]
-
-# Start the ASIO IO context and start the servers
-io_context = IOContext()
-devices = {device_name: TCPConnection(io_context, "127.0.0.1", device_dict[device_name],
-                                      True, device_name.endswith("Cmd"), device_name.endswith("Stat")) # <server> <heartbeat> <monitor>
-                            for device_name in device_dict
-           }
-devices["DaemonStat"].run_ctx(io_context)
 
 # Map GUI buttons to communication codes
 command_map = {
@@ -51,6 +38,9 @@ command_map = {
     "STOP_STATUS": int(CommCodes.OrcStopComputerStatus),
     "START_ALL_DAQ": int(CommCodes.OrcBootAllDaq),
     "SHUTDOWN_ALL_DAQ": int(CommCodes.OrcShutdownAllDaq),
+    "REBOOT_COMPUTER": int(CommCodes.OrcExecCpuRestart),
+    "SHUTDOWN_COMPUTER": int(CommCodes.OrcExecCpuShutdown),
+    "PCIE_DRIVER_INIT": int(CommCodes.OrcPcieInit),
     "RESET": int(CommCodes.ColResetRun),
     "CONFIGURE": int(CommCodes.ColConfigure),
     "START_RUN": int(CommCodes.ColStartRun),
@@ -163,7 +153,8 @@ if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False)
 
     # Stop the connections
-    for device_name in devices:
-        print("Stopping connection " + device_name + "..")
-        devices[device_name].stop_ctx(io_context)
-    print("Closed all server TCP/IP connections...")
+    fake_hub.shutdown_connections()
+    # for device_name in devices:
+    #     print("Stopping connection " + device_name + "..")
+    #     devices[device_name].stop_ctx(io_context)
+    # print("Closed all server TCP/IP connections...")

@@ -131,6 +131,28 @@ devices.forEach(({ name, title }) => {
       btn.onclick = () => sendCommand(name, label.replace(/ /g, '_').toUpperCase());
       btnContainer.appendChild(btn);
     });
+
+    // --- Second row (Reboot Shutdown) ---
+    const bottomRow = document.createElement("div");
+    bottomRow.style.display = "flex";
+    bottomRow.style.alignItems = "left";
+    bottomRow.style.gap = "10px";
+    div.appendChild(bottomRow);
+
+      ["Reboot Computer", "Shutdown Computer", "PCIe Driver Init"].forEach(label => {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.style.backgroundColor = "orange";
+      btn.style.color = "white";
+      btn.onclick = () => {
+          const confirmed = window.confirm(`Are you sure you want to ${label.toLowerCase()}?`);
+          if(confirmed) {
+            sendCommand(name, label.replace(/ /g, '_').toUpperCase());
+          }
+      }
+      bottomRow.appendChild(btn);
+    });
+
   } else if (name.endsWith("Cmd")) {
 
     const configContainer = document.createElement("div");
@@ -168,7 +190,7 @@ devices.forEach(({ name, title }) => {
     // --- Second row (Remote config input + button) ---
     const bottomRow = document.createElement("div");
     bottomRow.style.display = "flex";
-    bottomRow.style.alignItems = "center";
+    bottomRow.style.alignItems = "left";
     bottomRow.style.gap = "10px";
 
     const input = document.createElement("input");
@@ -189,65 +211,6 @@ devices.forEach(({ name, title }) => {
 
     // --- Add the container to the device panel ---
     btnContainer.appendChild(configContainer);
-
-    // const configContainer = document.createElement("div");
-    // configContainer.className = "config-container";
-    //
-    // // container for config-related controls
-    // const configRow = document.createElement("div");
-    // configRow.style.display = "flex";
-    // configRow.style.alignItems = "left";
-    // configRow.style.gap = "10px";
-    // // --- Full-config configure (only for TPCReadoutCmd) ---
-    // if (name === "TPCReadoutCmd") {
-    //   const fullConfigBtn = document.createElement("button");
-    //   fullConfigBtn.textContent = "CONFIGURE (Send)";
-    //   fullConfigBtn.onclick = () => {
-    //       if (Object.keys(loadedConfig).length === 0) {
-    //         alert("No config loaded yet!");
-    //         return;
-    //       }
-    //       sendCommand(name, "CONFIGURE", loadedConfig);
-    //       appendLog(`Sent full config to ${name}`);
-    //   };
-    //   configContainer.appendChild(fullConfigBtn);
-    //
-    //     // --- Single-value configure ---
-    //     const configBtn = document.createElement("button");
-    //     configBtn.textContent = "CONFIGURE (Remote)";
-    //     configBtn.onclick = () => {
-    //         const value = document.getElementById(`config-value-${name}`).value;
-    //         sendCommand(name, "CONFIGURE", value);
-    //     };
-    //     // configContainer.appendChild(configBtn);
-    //      configRow.appendChild(configBtn);
-    // } else {
-    //     // --- Single-value configure ---
-    //     const configBtn = document.createElement("button");
-    //     configBtn.textContent = "CONFIGURE";
-    //     configBtn.onclick = () => {
-    //         const value = document.getElementById(`config-value-${name}`).value;
-    //         sendCommand(name, "CONFIGURE", value);
-    //     };
-    //     // configContainer.appendChild(configBtn);
-    //     configRow.appendChild(configBtn);
-    // }
-    // // -- The box to take in the config number for the remote config --
-    // const input = document.createElement("input");
-    // input.type = "number";
-    // input.placeholder = "Enter value";
-    // input.id = `config-value-${name}`;
-    //
-    // configRow.appendChild(input);
-    // configContainer.appendChild(configRow);
-    // btnContainer.appendChild(configContainer);
-    //
-    // ["RUN", "STOP", "RESET"].forEach(label => {
-    //   const btn = document.createElement("button");
-    //   btn.textContent = label;
-    //   btn.onclick = () => sendCommand(name, label);
-    //   btnContainer.appendChild(btn);
-    // });
   }
 
   const logDiv = document.createElement("div");
