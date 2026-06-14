@@ -79,4 +79,3 @@ dependencies:
   - wsproto=1.3.1=pyhd8ed1ab_0
   - zipp=3.23.0=pyhd8ed1ab_0
   - zstd=1.5.7=hb8e6e7a_2
-prefix: /home/jons/.conda/envs/pgrams_tpc_metrics

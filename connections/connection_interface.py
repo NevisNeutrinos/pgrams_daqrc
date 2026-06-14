@@ -5,7 +5,7 @@ from slow_controls.grafana_link import GrafanaLink
 from slow_controls.mysql_link import MysqlLink
 from datamon import DaqCompMonitor, TpcReadoutMonitor, LowBwTpcMonitor, CommCodes, TelemCodes
 from datamon import TpcMonitorChargeEvent, TpcMonitorLightEvent
-from data_monitoring.test_web import ChannelMonitorWeb
+from data_monitoring.dqm_web import DqmWeb
 
 from threading import Thread
 from queue import Queue
@@ -19,7 +19,7 @@ if USE_FAKE_HUB:
     from connections.fake_hub import FakeHub
 
 class ConnectionInterface:
-    def __init__(self, interface):
+    def __init__(self, interface, monitor=None):
 
         self.tmp_ctr = 0
         self.use_fake_hub = USE_FAKE_HUB
@@ -92,8 +92,7 @@ class ConnectionInterface:
                  for device_name in self.device_dict
         ]
 
-        # Start gui
-        self.monitor = ChannelMonitorWeb()
+        self.monitor = monitor if monitor is not None else DqmWeb()
         self.monitor.run()
 
         # Start the streaming
@@ -182,13 +181,32 @@ class ConnectionInterface:
             return self.convert_metric_dict(dev_deserializer.get_metric_dict())
         return data
 
-    def display_samples(self, samples, channel, is_charge):
-        self.monitor.update_samples(sample=samples, channel=channel, is_charge=is_charge)
+    def display_charge_event(self, data):
+        self.monitor.update_charge_channel(
+            data["channel_number"],
+            data["charge_samples"],
+            evt_number=data.get("evt_number"),
+        )
+
+    def display_light_event(self, data):
+        self.monitor.update_light_channel(
+            data["channel_number"],
+            data["light_samples"],
+            start_tick=data.get("start_tick", 0),
+            evt_number=data.get("evt_number"),
+        )
 
     def display_data(self, data):
         print("Updating TPC metrics..")
-        self.monitor.update_data(data["charge_baseline"], data["charge_rms"], data["charge_avg_num_hits"], 
-                                 data["light_baseline"], data["light_rms"], data["light_avg_num_hits"])
+        self.monitor.update_lbw(
+            data["charge_baseline"],
+            data["charge_rms"],
+            data["charge_avg_num_hits"],
+            data["light_baseline"],
+            data["light_rms"],
+            data["light_avg_num_hits"],
+            evt_number=data.get("evt_number"),
+        )
 
     def write_data_monitor(self, data, file_dict):
         use_hdf5 = False
@@ -223,11 +241,11 @@ class ConnectionInterface:
                 print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["charge_samples"]))
             self.tmp_ctr += 1
             if deserialized_data["channel_number"] == 191: self.tmp_ctr = 0
-            self.display_samples(deserialized_data["charge_samples"], deserialized_data["channel_number"], is_charge=True)
+            self.display_charge_event(deserialized_data)
         elif command == 0x4003: # light waveforms
             self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_light)
             print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["light_samples"]))
-            self.display_samples(deserialized_data["light_samples"], deserialized_data["channel_number"], is_charge=False)
+            self.display_light_event(deserialized_data)
 
     def deserialize_telemetry_args(self):
         print("Starting telemetry stream deserialization..")
