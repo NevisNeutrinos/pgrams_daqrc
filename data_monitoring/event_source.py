@@ -11,6 +11,20 @@ import numpy as np
 Q_SLOTS_DEFAULT = [13, 14, 15]
 LIGHT_SLOT_DEFAULT = 16
 SAMPLES_PER_FRAME = 256
+# Q-FEM readout is trigger-aligned: firmware records a fixed number of
+# pre-trigger samples (256 pre + ~507 post; observed window = 763 samples), so
+# the trigger lands at this column regardless of absolute frame/sample.
+# NOTE: 256 is the documented pre-trigger count, still to be confirmed against
+# firmware (the readout could instead be frame-aligned -> 256 + trig_sample).
+Q_PRETRIGGER_SAMPLES = 256
+
+# L-FEM (light) timing. SiPM digitizes at 64 MHz, 1 frame = 128 us = 8192 ticks.
+# frame_num is a 3-bit (mod-8) master frame counter; the light readout window is
+# the 4 frames [trig_frame-1 .. trig_frame+2]. The FEMHeader6 trigger is stored
+# at 2 MHz (256 samples/frame), so 1 charge sample = 32 light ticks.
+LIGHT_FRAME_MOD = 8
+LIGHT_TICKS_PER_FRAME = 8192
+Q_SAMPLE_TO_LIGHT_TICK = LIGHT_TICKS_PER_FRAME // SAMPLES_PER_FRAME  # 2 MHz -> 64 MHz
 
 _EVENT_OFFSET_CACHE: dict[str, list[int]] = {}
 _EVENT_CACHE: dict[tuple, EventRecord] = {}
@@ -86,15 +100,6 @@ def parse_trig_from_header6(w: int) -> tuple[int, int, int]:
     sample = ((sample_upper << 8) & 0xF00) | sample_lower
     tick = trig_frame * SAMPLES_PER_FRAME + sample
     return trig_frame, sample, tick
-
-
-def q_trigger_in_readout(trig_frame: int, trig_sample: int, nsamp: int) -> int:
-    """Map FEMHeader6 frame+sample to x within the Q readout window."""
-    if nsamp <= 0:
-        return trig_sample
-    n_frames = max(1, (nsamp + SAMPLES_PER_FRAME - 1) // SAMPLES_PER_FRAME)
-    x = (trig_frame % n_frames) * SAMPLES_PER_FRAME + trig_sample
-    return min(x, nsamp - 1)
 
 
 def build_event_offset_index(txt_path: str) -> list[int]:
@@ -279,17 +284,36 @@ class HexdumpEventSource:
 
         event_trig = next(iter(trigger_meta.values()), None)
         trigger_abs = event_trig["abs"] if event_trig else None
-        trig_frame = event_trig["frame"] if event_trig else 0
-        trig_sample = event_trig["sample"] if event_trig else 0
 
         trigger_ticks: dict[int, int] = {}
-        for slot in self.q_slots:
-            chans = charge_slots.get(slot, {})
-            nsamp = max((len(v) for v in chans.values()), default=0)
-            if event_trig is not None:
-                trigger_ticks[slot] = q_trigger_in_readout(trig_frame, trig_sample, nsamp)
-        if self.light_slot in trigger_meta:
-            trigger_ticks[self.light_slot] = trigger_meta[self.light_slot]["abs"]
+        if event_trig is not None:
+            # Q-FEM: trigger sits at the fixed pre-trigger column within the
+            # readout window (the FEMHeader6 frame/sample is the ABSOLUTE trigger
+            # time, not its position inside the window).
+            for slot in self.q_slots:
+                chans = charge_slots.get(slot, {})
+                nsamp = max((len(v) for v in chans.values()), default=0)
+                if nsamp > 0:
+                    trigger_ticks[slot] = min(Q_PRETRIGGER_SAMPLES, nsamp - 1)
+
+            # L-FEM: each ROI's frame_num is mod-8, so map the 4-frame window
+            # [trig_frame-1 .. trig_frame+2] onto a continuous 64 MHz axis with
+            # the -1 frame at tick 0. start_sample (0..8191) is the 64 MHz
+            # position within its frame; without this, ROIs from different frames
+            # collapse onto the same 0..8191 range and a wrap-around -1 frame
+            # would be misordered.
+            trig_frame = event_trig["frame"]
+            trig_sample = event_trig["sample"]
+            earliest_frame = (trig_frame - 1) % LIGHT_FRAME_MOD
+            for rois in light_channels.values():
+                for roi in rois:
+                    local_frame = (roi["frame_num"] - earliest_frame) % LIGHT_FRAME_MOD
+                    roi["start_sample"] += local_frame * LIGHT_TICKS_PER_FRAME
+            if self.light_slot in trigger_meta:
+                # trig_frame maps to local frame 1; convert 2 MHz sample to ticks.
+                trigger_ticks[self.light_slot] = (
+                    LIGHT_TICKS_PER_FRAME + trig_sample * Q_SAMPLE_TO_LIGHT_TICK
+                )
 
         record = EventRecord(
             evt_number=evt_idx,

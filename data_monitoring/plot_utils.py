@@ -7,7 +7,8 @@ import plotly.graph_objects as go
 
 N_QFEM_CHANNELS = 64
 N_LIGHT_CHANNELS = 36
-SAMPLES_PER_FRAME = 256
+SAMPLES_PER_FRAME = 256       # Q-FEM: 2 MHz, 256 samples / 128 us frame
+LIGHT_TICKS_PER_FRAME = 8192  # L-FEM: 64 MHz, 8192 ticks / 128 us frame
 
 COMPACT_MARGIN = dict(l=48, r=12, t=36, b=32)
 HEATMAP_HEIGHT = 290
@@ -79,10 +80,10 @@ def build_light_heatmap(
 def _add_trigger_line(fig: go.Figure, trigger_x: int | None, *, absolute: bool = False):
     if trigger_x is None:
         return
-    label = "trigger"
     fig.add_vline(
         x=trigger_x,
         line_width=2,
+        line_dash="dash",
         line_color="limegreen",
         opacity=0.9,
     )
@@ -90,10 +91,11 @@ def _add_trigger_line(fig: go.Figure, trigger_x: int | None, *, absolute: bool =
         x=trigger_x,
         y=1.02,
         yref="paper",
-        text=label,
+        text="trigger",
         showarrow=False,
         font=dict(size=9, color="green"),
         xanchor="center",
+        yanchor="bottom",
     )
 
 
@@ -124,7 +126,7 @@ def make_charge_heatmap_figure(
 
     fig.update_layout(
         title=dict(text=f"{title} ({nchan}ch x {nsamp} smp, ped-sub)", font=dict(size=11)),
-        xaxis_title="sample",
+        xaxis_title="sample (0.5 \u03bcs each time tick)",
         yaxis_title="ch",
         margin=COMPACT_MARGIN,
         height=HEATMAP_HEIGHT,
@@ -165,14 +167,14 @@ def make_light_heatmap_figure(
             colorbar=dict(title="ADC", len=1.0, thickness=14),
         )
     )
-    first_line = ((xmin + SAMPLES_PER_FRAME - 1) // SAMPLES_PER_FRAME) * SAMPLES_PER_FRAME
-    for x in range(first_line, xmin + width, SAMPLES_PER_FRAME):
+    first_line = ((xmin + LIGHT_TICKS_PER_FRAME - 1) // LIGHT_TICKS_PER_FRAME) * LIGHT_TICKS_PER_FRAME
+    for x in range(first_line, xmin + width, LIGHT_TICKS_PER_FRAME):
         fig.add_vline(x=x, line_width=1, line_dash="dash", line_color="black", opacity=0.45)
     _add_trigger_line(fig, trigger_x)
 
     fig.update_layout(
         title=dict(text=f"{title} ({len(fired)} ch, {n_rois} ROIs)", font=dict(size=11)),
-        xaxis_title="2 MHz tick",
+        xaxis_title="sample (15.6 ns each time tick)",
         yaxis_title="ch",
         margin=COMPACT_MARGIN,
         height=HEATMAP_HEIGHT,
