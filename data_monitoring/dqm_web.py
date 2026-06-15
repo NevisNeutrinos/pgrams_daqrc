@@ -29,10 +29,10 @@ PANEL_HIDE = {"display": "none"}
 PANEL_SHOW = {"display": "block"}
 from data_monitoring.plot_utils import (
     HEATMAP_HEIGHT,
-    LBW_HEIGHT,
+    compute_charge_lbw,
+    compute_light_lbw,
     make_charge_heatmap_figure,
-    make_compact_bar,
-    make_compact_bar_with_error,
+    make_lbw_panel_figure,
     make_lfem_waveform_figure,
     make_light_heatmap_figure,
     make_qfem_waveform_figure,
@@ -67,7 +67,6 @@ Q_SLOTS = Q_SLOTS_DEFAULT
 LIGHT_SLOT = LIGHT_SLOT_DEFAULT
 FEM_SLOTS = Q_SLOTS + [LIGHT_SLOT]
 CHANNELS_PER_QFEM = 64
-LBW_STACK_HEIGHT = max(80, (HEATMAP_HEIGHT - 8) // 3)
 
 
 def _slice_q_lbw(lbw_q: tuple | None, slot_idx: int) -> tuple[list, list, list] | None:
@@ -76,7 +75,13 @@ def _slice_q_lbw(lbw_q: tuple | None, slot_idx: int) -> tuple[list, list, list] 
     bq, rq, hq = lbw_q
     i0 = slot_idx * CHANNELS_PER_QFEM
     i1 = i0 + CHANNELS_PER_QFEM
-    return bq[i0:i1], rq[i0:i1], hq[i0:i1]
+    b, r, h = bq[i0:i1], rq[i0:i1], hq[i0:i1]
+    if len(b) < CHANNELS_PER_QFEM:
+        pad = CHANNELS_PER_QFEM - len(b)
+        b = list(b) + [0.0] * pad
+        r = list(r) + [0.0] * pad
+        h = list(h) + [0.0] * pad
+    return b, r, h
 
 
 def _slice_l_lbw(lbw_l: tuple | None) -> tuple[list, list, list] | None:
@@ -108,7 +113,7 @@ class DqmWeb:
         return html.Div(
             style={
                 "display": "grid",
-                "gridTemplateColumns": "minmax(0, 1.55fr) minmax(0, 0.85fr)",
+                "gridTemplateColumns": "minmax(0, 1.4fr) minmax(0, 0.86fr)",
                 "gap": "8px",
                 "alignItems": "stretch",
                 "marginBottom": "6px",
@@ -119,18 +124,10 @@ class DqmWeb:
                     config={"displayModeBar": False},
                     style={"height": f"{HEATMAP_HEIGHT}px"},
                 ),
-                html.Div(
-                    style={
-                        "display": "grid",
-                        "gridTemplateRows": "1fr 1fr 1fr",
-                        "gap": "4px",
-                        "height": f"{HEATMAP_HEIGHT}px",
-                    },
-                    children=[
-                        dcc.Graph(id=f"lbw-{slot}-baseline", config={"displayModeBar": False}),
-                        dcc.Graph(id=f"lbw-{slot}-rms", config={"displayModeBar": False}),
-                        dcc.Graph(id=f"lbw-{slot}-hits", config={"displayModeBar": False}),
-                    ],
+                dcc.Graph(
+                    id=f"lbw-{slot}",
+                    config={"displayModeBar": False},
+                    style={"height": f"{HEATMAP_HEIGHT}px"},
                 ),
             ],
         )
@@ -301,9 +298,8 @@ class DqmWeb:
                 for ch, rois in record.light_channels.items()
             }
             self.trigger_ticks = dict(record.trigger_ticks)
-            # Placeholder LBW until live 0x4001 arrives.
-            self.lbw_charge = ([2100] * 192, [8] * 192, [1] * 192)
-            self.lbw_light = ([2050] * 36, [6] * 36, [8] * 36)
+            self.lbw_charge = compute_charge_lbw(self.charge_slots, Q_SLOTS)
+            self.lbw_light = compute_light_lbw(self.light_channels)
 
     def load_offline_event(
         self,
@@ -428,25 +424,21 @@ class DqmWeb:
         for i, slot in enumerate(Q_SLOTS):
             chunk = _slice_q_lbw(lbw_q, i)
             if chunk is None:
-                lbw_figs.extend([self._empty(), self._empty(), self._empty()])
+                lbw_figs.append(self._empty())
             else:
                 b, r, h = chunk
-                lbw_figs.extend([
-                    make_compact_bar_with_error(b, r, f"Q{slot} base", "ADC", LBW_STACK_HEIGHT),
-                    make_compact_bar(r, f"Q{slot} RMS", "ADC", LBW_STACK_HEIGHT),
-                    make_compact_bar(h, f"Q{slot} hits", "", LBW_STACK_HEIGHT),
-                ])
+                lbw_figs.append(make_lbw_panel_figure(b, r, h, slot_label=f"Q{slot}"))
 
         l_chunk = _slice_l_lbw(lbw_l)
         if l_chunk is None:
-            lbw_figs.extend([self._empty(), self._empty(), self._empty()])
+            lbw_figs.append(self._empty())
         else:
             b, r, h = l_chunk
-            lbw_figs.extend([
-                make_compact_bar_with_error(b, r, f"L{LIGHT_SLOT} base", "ADC", LBW_STACK_HEIGHT),
-                make_compact_bar(r, f"L{LIGHT_SLOT} RMS", "ADC", LBW_STACK_HEIGHT),
-                make_compact_bar(h, f"L{LIGHT_SLOT} hits", "", LBW_STACK_HEIGHT),
-            ])
+            lbw_figs.append(
+                make_lbw_panel_figure(
+                    b, r, h, slot_label=f"L{LIGHT_SLOT}", is_light=True,
+                )
+            )
 
         return evt_label, heatmaps, lbw_figs
 
@@ -455,11 +447,7 @@ class DqmWeb:
         figure_outputs += [Output(f"qfem-slot-{s}", "figure") for s in Q_SLOTS]
         figure_outputs += [Output("lfem-heatmap", "figure")]
         for slot in FEM_SLOTS:
-            figure_outputs += [
-                Output(f"lbw-{slot}-baseline", "figure"),
-                Output(f"lbw-{slot}-rms", "figure"),
-                Output(f"lbw-{slot}-hits", "figure"),
-            ]
+            figure_outputs.append(Output(f"lbw-{slot}", "figure"))
 
         @self.app.callback(
             figure_outputs + [Output("pause-check", "value"), Output("status-msg", "children")],

@@ -68,9 +68,74 @@ LIGHT_TICKS_PER_FRAME = 8192  # L-FEM: 64 MHz, 8192 ticks / 128 us frame
 COMPACT_MARGIN = dict(l=48, r=12, t=36, b=32)
 HEATMAP_HEIGHT = 290
 LBW_HEIGHT = 92
-# Matches plot_event_adc.ipynb: VMIN, VMAX = -5, 5
-Q_CHARGE_VMIN = -5.0
-Q_CHARGE_VMAX = 5.0
+# Minimum half-range for Q ped-sub heatmaps: zlim = max(max(|ADC-med|), Z_FLOOR).
+Q_CHARGE_Z_FLOOR = 5.0
+
+
+def charge_heatmap_zlim(img_sub: np.ndarray) -> float:
+    finite = img_sub[np.isfinite(img_sub)]
+    if finite.size == 0:
+        return Q_CHARGE_Z_FLOOR
+    return max(float(np.max(np.abs(finite))), Q_CHARGE_Z_FLOOR)
+
+# Offline Q hit count: samples above median + max(Q_HIT_SIGMA_MULT * RMS, Q_HIT_MIN_ADC).
+Q_HIT_SIGMA_MULT = 3.0
+Q_HIT_MIN_ADC = 1.0
+
+
+def compute_charge_lbw(
+    charge_slots: dict[int, dict[int, np.ndarray]],
+    q_slots: list[int],
+    channels_per_slot: int = N_QFEM_CHANNELS,
+) -> tuple[list[float], list[float], list[float]]:
+    """Per-channel baseline (median), RMS (std), and hit count from Q-FEM waveforms.
+
+    Hits: samples with |ADC − median| > max(3*RMS, 1 ADC).
+    """
+    baselines: list[float] = []
+    rmses: list[float] = []
+    hits: list[float] = []
+    for slot in q_slots:
+        channels = charge_slots.get(slot, {})
+        for ch in range(channels_per_slot):
+            if ch in channels and len(channels[ch]) > 0:
+                arr = np.asarray(channels[ch], dtype=np.float64)
+                b = float(np.median(arr))
+                r = float(np.std(arr))
+                delta = max(Q_HIT_SIGMA_MULT * r, Q_HIT_MIN_ADC)
+                h = float(np.sum(np.abs(arr - b) > delta))
+            else:
+                b, r, h = 0.0, 0.0, 0.0
+            baselines.append(b)
+            rmses.append(r)
+            hits.append(h)
+    return baselines, rmses, hits
+
+
+def compute_light_lbw(
+    light_channels: dict[int, list[dict]],
+    nchan: int = N_LIGHT_CHANNELS,
+) -> tuple[list[float], list[float], list[float]]:
+    """Per-channel baseline (median), RMS (std), and ROI count from L-FEM data."""
+    baselines: list[float] = []
+    rmses: list[float] = []
+    hits: list[float] = []
+    for ch in range(nchan):
+        rois = light_channels.get(ch, [])
+        active = [r for r in rois if len(r["samples"]) > 0]
+        if active:
+            all_samples = np.concatenate(
+                [np.asarray(r["samples"], dtype=np.float64) for r in active]
+            )
+            b = float(np.median(all_samples))
+            r = float(np.std(all_samples))
+            h = float(len(active))
+        else:
+            b, r, h = 0.0, 0.0, 0.0
+        baselines.append(b)
+        rmses.append(r)
+        hits.append(h)
+    return baselines, rmses, hits
 
 
 def build_charge_heatmap(channels: dict[int, np.ndarray]) -> tuple[np.ndarray, int, int]:
@@ -163,6 +228,7 @@ def make_charge_heatmap_figure(
     if not channels:
         return _empty_figure(title, "(no data)")
 
+    zlim = charge_heatmap_zlim(img_sub)
     fig = go.Figure(
         data=go.Heatmap(
             z=img_sub,
@@ -170,8 +236,8 @@ def make_charge_heatmap_figure(
             y=list(range(nchan)),
             colorscale="RdBu_r",
             zmid=0,
-            zmin=Q_CHARGE_VMIN,
-            zmax=Q_CHARGE_VMAX,
+            zmin=-zlim,
+            zmax=zlim,
             colorbar=dict(title="ADC-med", len=1.0, thickness=14),
         )
     )
@@ -275,6 +341,7 @@ def make_qfem_waveform_figure(
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.0)
 
     img_sub, nchan, _ = build_charge_heatmap(channels)
+    zlim = charge_heatmap_zlim(img_sub)
     top_len = domains[0][1] - domains[0][0]
     fig.add_trace(
         go.Heatmap(
@@ -283,8 +350,8 @@ def make_qfem_waveform_figure(
             y=list(range(nchan)),
             colorscale="RdBu_r",
             zmid=0,
-            zmin=Q_CHARGE_VMIN,
-            zmax=Q_CHARGE_VMAX,
+            zmin=-zlim,
+            zmax=zlim,
             colorbar=dict(title="ADC-med", len=top_len, y=domains[0][1], yanchor="top", thickness=12),
         ),
         row=1, col=1,
@@ -514,42 +581,124 @@ def make_lfem_waveform_figure(
     return fig
 
 
-def make_compact_bar(y, title: str, y_title: str = "", height: int | None = None) -> go.Figure:
-    h = height or LBW_HEIGHT
-    fig = go.Figure()
-    fig.add_bar(x=list(range(len(y))), y=y, marker_line_width=0)
-    fig.update_layout(
-        title=dict(text=title, font=dict(size=10)),
-        xaxis_title="ch",
-        yaxis_title=y_title,
-        margin=dict(l=40, r=4, t=26, b=20),
-        height=h,
-        showlegend=False,
-    )
-    fig.update_xaxes(tickmode="linear", dtick=16, tickfont=dict(size=8))
-    return fig
+LBW_PANEL_TICK_FONT = 10
+LBW_PANEL_TITLE_FONT = 11
 
 
-def make_compact_bar_with_error(
-    baseline, std_dev, title: str, y_title: str = "", height: int | None = None
+def _lbw_channel_axis(n: int, is_light: bool) -> tuple[list[int], list[int]]:
+    """X range [-1, n+1]: 1-bin pad left, tick at n, 1 blank bin right of n."""
+    tickvals = [0, 9, 18, 27, 36] if is_light else [0, 16, 32, 48, 64]
+    if tickvals[-1] != n:
+        tickvals = [t for t in tickvals if t <= n]
+        if tickvals[-1] != n:
+            tickvals.append(n)
+    return [-1, n + 1], tickvals
+
+
+def _lbw_grid_positions(n: int, is_light: bool) -> tuple[list[int], list[int]]:
+    """Major/minor vertical grid positions (minor excludes major to avoid double lines)."""
+    major_step = 9 if is_light else 16
+    minor_step = 3 if is_light else 4
+    major = list(range(0, n + 1, major_step))
+    if major[-1] != n:
+        major.append(n)
+    major_set = set(major)
+    minor = [x for x in range(0, n + 1, minor_step) if x not in major_set]
+    return major, minor
+
+
+def _add_lbw_grid_vlines(fig: go.Figure, major: list[int], minor: list[int], row: int) -> None:
+    """Draw grid behind traces (layer='below')."""
+    yref = "y domain" if row == 1 else "y2 domain"
+    xref = "x"
+    for x in minor:
+        fig.add_shape(
+            type="line", x0=x, x1=x, y0=0, y1=1,
+            xref=xref, yref=yref,
+            line=dict(color="white", width=0.4),
+            layer="below",
+        )
+    for x in major:
+        fig.add_shape(
+            type="line", x0=x, x1=x, y0=0, y1=1,
+            xref=xref, yref=yref,
+            line=dict(color="white", width=1.2),
+            layer="below",
+        )
+
+
+def make_lbw_panel_figure(
+    baseline,
+    std_dev,
+    hits,
+    *,
+    slot_label: str,
+    is_light: bool = False,
+    height: int = HEATMAP_HEIGHT,
 ) -> go.Figure:
-    h = height or LBW_HEIGHT
-    fig = go.Figure()
-    fig.add_bar(
-        x=list(range(len(baseline))),
-        y=baseline,
-        error_y=dict(type="data", array=std_dev, visible=True, thickness=0.8, width=2),
-        marker_line_width=0,
+    """Two-row panel: median±σ (top) + hits (bottom), one figure per FEM."""
+    n = len(baseline)
+    x = list(range(n))
+    x_range, x_ticks = _lbw_channel_axis(n, is_light)
+    major_grid, minor_grid = _lbw_grid_positions(n, is_light)
+    hit_title = (
+        f"{slot_label} hits (ROIs/ch)"
+        if is_light
+        else f"{slot_label} hits (|ADC−med|>max({Q_HIT_SIGMA_MULT:g}σ,{Q_HIT_MIN_ADC:g}))"
     )
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.56, 0.44], vertical_spacing=0.10,
+        subplot_titles=(f"{slot_label} median±σ", hit_title),
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x, y=baseline, mode="markers",
+            marker=dict(size=4, color="#2563eb"),
+            error_y=dict(type="data", array=std_dev, visible=True, thickness=1.0, width=3),
+            showlegend=False,
+        ),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Bar(x=x, y=hits, marker_line_width=0, showlegend=False),
+        row=2, col=1,
+    )
+
+    spans = [(b - r, b + r) for b, r in zip(baseline, std_dev) if b > 0]
+    if spans:
+        y0 = min(lo for lo, _ in spans)
+        y1 = max(hi for _, hi in spans)
+        pad = max(0.5, 0.1 * (y1 - y0))
+        fig.update_yaxes(
+            range=[y0 - pad, y1 + pad], title_text="ADC", row=1, col=1,
+            tickfont=dict(size=LBW_PANEL_TICK_FONT),
+        )
+
+    hit_max = max((v for v in hits if v > 0), default=1.0)
+    fig.update_yaxes(
+        range=[0, hit_max * 1.15 + 0.5], title_text="Hit counts", row=2, col=1,
+        tickfont=dict(size=LBW_PANEL_TICK_FONT),
+    )
+
+    x_kw = dict(
+        range=x_range,
+        tickmode="array",
+        tickvals=x_ticks,
+        tickfont=dict(size=LBW_PANEL_TICK_FONT),
+        showgrid=False,
+    )
+    fig.update_xaxes(**x_kw, showticklabels=False, row=1, col=1)
+    fig.update_xaxes(**x_kw, title_text="ch", row=2, col=1)
+    for r in (1, 2):
+        _add_lbw_grid_vlines(fig, major_grid, minor_grid, r)
+
     fig.update_layout(
-        title=dict(text=title, font=dict(size=10)),
-        xaxis_title="ch",
-        yaxis_title=y_title,
-        margin=dict(l=40, r=4, t=26, b=20),
-        height=h,
+        height=height,
+        margin=dict(l=42, r=14, t=38, b=24),
         showlegend=False,
     )
-    fig.update_xaxes(tickmode="linear", dtick=16, tickfont=dict(size=8))
+    fig.update_annotations(font_size=LBW_PANEL_TITLE_FONT)
     return fig
 
 

@@ -25,9 +25,9 @@ def _demo_feeder(dqm: DqmWeb, interval: float = 3.0):
         evt += 1
         dqm.reset_event(evt)
 
-        baselines = [2100 + int(rng.integers(-30, 30)) for _ in range(180)]
-        rms = [8 + int(rng.integers(0, 6)) for _ in range(180)]
-        hits = [int(rng.integers(0, 5)) for _ in range(180)]
+        baselines = [2100 + int(rng.integers(-30, 30)) for _ in range(len(Q_SLOTS) * CHANNELS_PER_QFEM)]
+        rms = [8 + int(rng.integers(0, 6)) for _ in range(len(Q_SLOTS) * CHANNELS_PER_QFEM)]
+        hits = [int(rng.integers(0, 5)) for _ in range(len(Q_SLOTS) * CHANNELS_PER_QFEM)]
         l_base = [2050 + int(rng.integers(-20, 20)) for _ in range(36)]
         l_rms = [6 + int(rng.integers(0, 4)) for _ in range(36)]
         l_hits = [int(rng.integers(0, 3) * 8) for _ in range(36)]
