@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import webbrowser
 
@@ -32,8 +33,35 @@ from data_monitoring.plot_utils import (
     make_charge_heatmap_figure,
     make_compact_bar,
     make_compact_bar_with_error,
+    make_lfem_waveform_figure,
     make_light_heatmap_figure,
+    make_qfem_waveform_figure,
 )
+
+
+def _parse_channels(spec: str | None) -> tuple[list[int], bool]:
+    """Parse a channel spec into (channels, is_range).
+
+    - "[a,b]" -> inclusive range a..b, is_range=True (shade gray on heatmap).
+    - "0,5,12" -> explicit list, is_range=False (per-channel colored bands).
+    """
+    if not spec:
+        return [], False
+    s = spec.strip()
+    m = re.fullmatch(r"\[\s*(\d+)\s*,\s*(\d+)\s*\]", s)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        lo, hi = min(a, b), max(a, b)
+        return list(range(lo, hi + 1)), True
+    out: list[int] = []
+    for tok in re.split(r"[,\s]+", s):
+        if not tok:
+            continue
+        try:
+            out.append(int(tok))
+        except ValueError:
+            pass
+    return out, False
 
 Q_SLOTS = Q_SLOTS_DEFAULT
 LIGHT_SLOT = LIGHT_SLOT_DEFAULT
@@ -120,6 +148,47 @@ class DqmWeb:
             children=[html.H3(title, style={"color": "#555"}), html.P("Coming soon.")],
         )
 
+    def _qfem_waveform_panel(self) -> html.Div:
+        return html.Div(
+            children=[
+                html.Div(
+                    style={
+                        "display": "flex", "gap": "10px", "alignItems": "center",
+                        "margin": "8px 0", "flexWrap": "wrap",
+                    },
+                    children=[
+                        html.Label("Q-FEM:"),
+                        dcc.Dropdown(
+                            id="qdetail-slot",
+                            options=[{"label": f"slot {s}", "value": s} for s in Q_SLOTS],
+                            value=Q_SLOTS[0],
+                            clearable=False,
+                            style={"width": "130px"},
+                        ),
+                        html.Label("channels:"),
+                        dcc.Input(
+                            id="qdetail-channels", type="text",
+                            placeholder="E.g. [0,9] for a range; 0,5,12 for specific channels",
+                            value="", debounce=True, style={"width": "340px"},
+                        ),
+                        html.Span("(0\u201363, any number)", style={"color": "#888", "fontSize": "12px"}),
+                    ],
+                ),
+                dcc.Graph(id="qdetail-graph", style={"width": "96%"}),
+            ],
+        )
+
+    def _lfem_waveform_panel(self) -> html.Div:
+        return html.Div(
+            children=[
+                html.Div(
+                    "Full-window overlay (top) + each responding channel zoomed to its ROI(s).",
+                    style={"color": "#888", "fontSize": "12px", "margin": "8px 0"},
+                ),
+                dcc.Graph(id="ldetail-graph", style={"width": "96%"}),
+            ],
+        )
+
     def _build_layout(self) -> html.Div:
         return html.Div(
             style={"fontFamily": "Arial, sans-serif", "margin": "6px 10px"},
@@ -163,24 +232,30 @@ class DqmWeb:
                         html.Div(
                             style={"marginLeft": "auto", "display": "flex", "gap": "4px"},
                             children=[
-                                html.Button("Main", id="tab-btn-main", n_clicks=0, style=TAB_BTN_ACTIVE),
-                                html.Button("Q-FEM Detail", id="tab-btn-q", n_clicks=0, style=TAB_BTN),
-                                html.Button("L-FEM Detail", id="tab-btn-l", n_clicks=0, style=TAB_BTN),
+                                html.Button("Heatmaps", id="tab-btn-heat", n_clicks=0, style=TAB_BTN_ACTIVE),
+                                html.Button("Q-FEM waveforms", id="tab-btn-q", n_clicks=0, style=TAB_BTN),
+                                html.Button("L-FEM waveforms", id="tab-btn-l", n_clicks=0, style=TAB_BTN),
+                                html.Button("Event display", id="tab-btn-evt", n_clicks=0, style=TAB_BTN),
                             ],
                         ),
                     ],
                 ),
                 html.Div(
-                    id="panel-main",
+                    id="panel-heat",
                     style=PANEL_SHOW,
                     children=[
                         *[self._fem_row(slot, is_light=False) for slot in Q_SLOTS],
                         self._fem_row(LIGHT_SLOT, is_light=True),
                     ],
                 ),
-                html.Div(id="panel-q", style=PANEL_HIDE, children=[self._placeholder_tab("Q-FEM Detail")]),
-                html.Div(id="panel-l", style=PANEL_HIDE, children=[self._placeholder_tab("L-FEM Detail")]),
-                dcc.Store(id="active-tab", data="main"),
+                html.Div(id="panel-q", style=PANEL_HIDE, children=[self._qfem_waveform_panel()]),
+                html.Div(id="panel-l", style=PANEL_HIDE, children=[self._lfem_waveform_panel()]),
+                html.Div(
+                    id="panel-evt",
+                    style=PANEL_HIDE,
+                    children=[self._placeholder_tab("Event display (charge 2D / light 3D reconstruction)")],
+                ),
+                dcc.Store(id="active-tab", data="heat"),
                 dcc.Interval(id="update-interval", interval=2000, n_intervals=0),
             ],
         )
@@ -444,36 +519,82 @@ class DqmWeb:
         @self.app.callback(
             [
                 Output("active-tab", "data"),
-                Output("panel-main", "style"),
+                Output("panel-heat", "style"),
                 Output("panel-q", "style"),
                 Output("panel-l", "style"),
-                Output("tab-btn-main", "style"),
+                Output("panel-evt", "style"),
+                Output("tab-btn-heat", "style"),
                 Output("tab-btn-q", "style"),
                 Output("tab-btn-l", "style"),
+                Output("tab-btn-evt", "style"),
             ],
             [
-                Input("tab-btn-main", "n_clicks"),
+                Input("tab-btn-heat", "n_clicks"),
                 Input("tab-btn-q", "n_clicks"),
                 Input("tab-btn-l", "n_clicks"),
+                Input("tab-btn-evt", "n_clicks"),
             ],
             State("active-tab", "data"),
         )
-        def switch_tab(n_main, n_q, n_l, current):
+        def switch_tab(n_heat, n_q, n_l, n_evt, current):
             triggered = dash.callback_context.triggered_id
-            tab = current or "main"
-            if triggered == "tab-btn-q":
-                tab = "q"
-            elif triggered == "tab-btn-l":
-                tab = "l"
-            elif triggered == "tab-btn-main":
-                tab = "main"
+            order = ["heat", "q", "l", "evt"]
+            by_btn = {
+                "tab-btn-heat": "heat", "tab-btn-q": "q",
+                "tab-btn-l": "l", "tab-btn-evt": "evt",
+            }
+            tab = by_btn.get(triggered, current or "heat")
 
-            styles = [PANEL_HIDE, PANEL_HIDE, PANEL_HIDE]
-            btn_styles = [TAB_BTN, TAB_BTN, TAB_BTN]
-            idx = {"main": 0, "q": 1, "l": 2}[tab]
+            styles = [PANEL_HIDE] * 4
+            btn_styles = [TAB_BTN] * 4
+            idx = order.index(tab)
             styles[idx] = PANEL_SHOW
             btn_styles[idx] = TAB_BTN_ACTIVE
             return tab, *styles, *btn_styles
+
+        @self.app.callback(
+            Output("qdetail-graph", "figure"),
+            [
+                Input("update-interval", "n_intervals"),
+                Input("active-tab", "data"),
+                Input("qdetail-slot", "value"),
+                Input("qdetail-channels", "value"),
+                Input("load-btn", "n_clicks"),
+            ],
+        )
+        def q_waveforms(_n, tab, slot, chan_str, _load):
+            if tab != "q":
+                return no_update
+            if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
+                return no_update
+            evt, charge, _light, _bq, _bl, triggers = self._snapshot()
+            slot = int(slot) if slot is not None else Q_SLOTS[0]
+            selected, is_range = _parse_channels(chan_str)
+            return make_qfem_waveform_figure(
+                charge.get(slot, {}), selected,
+                trigger_x=triggers.get(slot),
+                title=f"Q-FEM slot {slot} (evt {evt if evt is not None else '--'})",
+                band_gray=is_range,
+            )
+
+        @self.app.callback(
+            Output("ldetail-graph", "figure"),
+            [
+                Input("update-interval", "n_intervals"),
+                Input("active-tab", "data"),
+                Input("load-btn", "n_clicks"),
+            ],
+        )
+        def l_waveforms(_n, tab, _load):
+            if tab != "l":
+                return no_update
+            if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
+                return no_update
+            evt, _charge, light, _bq, _bl, triggers = self._snapshot()
+            return make_lfem_waveform_figure(
+                light, trigger_x=triggers.get(LIGHT_SLOT),
+                title=f"L-FEM slot {LIGHT_SLOT} (evt {evt if evt is not None else '--'})",
+            )
 
     def run(self, blocking: bool = False, open_browser: bool = False):
         url = f"http://{self.host}:{self.port}"
