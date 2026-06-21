@@ -39,12 +39,21 @@ class EventRecord:
     trigger_ticks: dict[int, int] = field(default_factory=dict)
     # Event-level 2 MHz trigger tick (shared across FEMs in one event).
     trigger_abs: int | None = None
+    # Per-slot decoded FEMHeader6 trigger: {slot: {"frame","sample","abs"}}.
+    # Kept so the UI can flag Q/L (or Q/Q) header desync.
+    trigger_meta: dict[int, dict] = field(default_factory=dict)
 
 
 class EventSource(Protocol):
     name: str
 
-    def load(self, path: str, evt_idx: int) -> EventRecord: ...
+    def load(
+        self,
+        path: str,
+        evt_idx: int,
+        q_lag: tuple[int, int] = (0, 0),
+        l_lag: tuple[int, int] = (0, 0),
+    ) -> EventRecord: ...
 
 
 _REGISTRY: dict[str, EventSource] = {}
@@ -60,8 +69,14 @@ def get_source(name: str) -> EventSource:
     return _REGISTRY[name]
 
 
-def load_event(path: str, evt_idx: int, source: str = "hexdump") -> EventRecord:
-    return get_source(source).load(path, evt_idx)
+def load_event(
+    path: str,
+    evt_idx: int,
+    source: str = "hexdump",
+    q_lag: tuple[int, int] = (0, 0),
+    l_lag: tuple[int, int] = (0, 0),
+) -> EventRecord:
+    return get_source(source).load(path, evt_idx, q_lag=q_lag, l_lag=l_lag)
 
 
 # --- hexdump decoder ---
@@ -270,50 +285,89 @@ class HexdumpEventSource:
         self.q_slots = q_slots or Q_SLOTS_DEFAULT
         self.light_slot = light_slot
 
-    def load(self, path: str, evt_idx: int) -> EventRecord:
-        key = (path, evt_idx, tuple(self.q_slots), self.light_slot)
+    def load(
+        self,
+        path: str,
+        evt_idx: int,
+        q_lag: tuple[int, int] = (0, 0),
+        l_lag: tuple[int, int] = (0, 0),
+    ) -> EventRecord:
+        # Each lag is (header_lag, adc_lag): a FEM's FEMHeader6 (trigger) can be
+        # shipped from a different event than the ADC payload it travels with (the
+        # header trails the ADC by one event when the light readout stalls). The
+        # per-ROI timestamp and its samples are one inseparable packet, so a single
+        # adc_lag covers both. lag=0 -> this event. lag=+1 -> next event, etc.
+        q_hlag, q_alag = q_lag
+        l_hlag, l_alag = l_lag
+        key = (
+            path, evt_idx, q_hlag, q_alag, l_hlag, l_alag,
+            tuple(self.q_slots), self.light_slot,
+        )
         if key in _EVENT_CACHE:
             return _EVENT_CACHE[key]
 
         all_slots = self.q_slots + [self.light_slot]
-        payloads, trigger_meta = get_event_payloads(path, evt_idx, all_slots)
-        charge_slots = {
-            qs: decode_charge(payloads.get(qs, [])) for qs in self.q_slots
-        }
-        light_channels = decode_light(payloads.get(self.light_slot, []))
+        base_payloads, base_meta = get_event_payloads(path, evt_idx, all_slots)
 
-        event_trig = next(iter(trigger_meta.values()), None)
-        trigger_abs = event_trig["abs"] if event_trig else None
+        def _at(idx: int) -> tuple[dict[int, list[int]], dict[int, dict]]:
+            if idx == evt_idx:
+                return base_payloads, base_meta
+            try:
+                return get_event_payloads(path, idx, all_slots)
+            except IndexError:
+                return base_payloads, base_meta
+
+        # ADC payloads (charge / light ROIs) and trigger headers, each from its own
+        # (possibly lag-shifted) event.
+        q_adc_payloads, _ = _at(evt_idx + q_alag)
+        l_adc_payloads, _ = _at(evt_idx + l_alag)
+        _, q_meta = _at(evt_idx + q_hlag)
+        _, l_meta = _at(evt_idx + l_hlag)
+
+        charge_slots = {
+            qs: decode_charge(q_adc_payloads.get(qs, [])) for qs in self.q_slots
+        }
+        light_channels = decode_light(l_adc_payloads.get(self.light_slot, []))
+
+        q_trig = next((q_meta[s] for s in self.q_slots if s in q_meta), None)
+        if q_trig is None:
+            q_trig = next((base_meta[s] for s in self.q_slots if s in base_meta), None)
+        trigger_abs = q_trig["abs"] if q_trig else None
 
         trigger_ticks: dict[int, int] = {}
-        if event_trig is not None:
-            # Q-FEM: trigger sits at the fixed pre-trigger column within the
-            # readout window (the FEMHeader6 frame/sample is the ABSOLUTE trigger
-            # time, not its position inside the window).
-            for slot in self.q_slots:
-                chans = charge_slots.get(slot, {})
-                nsamp = max((len(v) for v in chans.values()), default=0)
-                if nsamp > 0:
-                    trigger_ticks[slot] = min(Q_PRETRIGGER_SAMPLES, nsamp - 1)
+        # Q-FEM: the trigger sits at the fixed pre-trigger column within the readout
+        # window (the readout is trigger-aligned), independent of the header sample,
+        # so the Q header lag does not move this line.
+        for slot in self.q_slots:
+            chans = charge_slots.get(slot, {})
+            nsamp = max((len(v) for v in chans.values()), default=0)
+            if nsamp > 0:
+                trigger_ticks[slot] = min(Q_PRETRIGGER_SAMPLES, nsamp - 1)
 
-            # L-FEM: each ROI's frame_num is mod-8, so map the 4-frame window
-            # [trig_frame-1 .. trig_frame+2] onto a continuous 64 MHz axis with
-            # the -1 frame at tick 0. start_sample (0..8191) is the 64 MHz
-            # position within its frame; without this, ROIs from different frames
-            # collapse onto the same 0..8191 range and a wrap-around -1 frame
-            # would be misordered.
-            trig_frame = event_trig["frame"]
-            trig_sample = event_trig["sample"]
+        # L-FEM: remap each ROI onto a continuous 64 MHz axis and place the trigger
+        # line, both anchored on the L-FEM's OWN FEMHeader6 (header-lag-adjusted).
+        # frame_num is mod-8: map the 4-frame window [trig_frame-1 .. trig_frame+2]
+        # with the -1 frame at tick 0; start_sample (0..8191) is the 64 MHz position
+        # within its frame.
+        l_trig = l_meta.get(self.light_slot) or base_meta.get(self.light_slot)
+        if l_trig is not None:
+            trig_frame = l_trig["frame"]
+            trig_sample = l_trig["sample"]
             earliest_frame = (trig_frame - 1) % LIGHT_FRAME_MOD
             for rois in light_channels.values():
                 for roi in rois:
                     local_frame = (roi["frame_num"] - earliest_frame) % LIGHT_FRAME_MOD
                     roi["start_sample"] += local_frame * LIGHT_TICKS_PER_FRAME
-            if self.light_slot in trigger_meta:
-                # trig_frame maps to local frame 1; convert 2 MHz sample to ticks.
-                trigger_ticks[self.light_slot] = (
-                    LIGHT_TICKS_PER_FRAME + trig_sample * Q_SAMPLE_TO_LIGHT_TICK
-                )
+            # trig_frame maps to local frame 1; convert 2 MHz sample to ticks.
+            trigger_ticks[self.light_slot] = (
+                LIGHT_TICKS_PER_FRAME + trig_sample * Q_SAMPLE_TO_LIGHT_TICK
+            )
+
+        # Headers actually used (after lag) so the UI's header-match warning reflects
+        # the user's choice: if a header lag makes Q and L agree, no warning shows.
+        used_meta: dict[int, dict] = {s: q_meta[s] for s in self.q_slots if s in q_meta}
+        if self.light_slot in l_meta:
+            used_meta[self.light_slot] = l_meta[self.light_slot]
 
         record = EventRecord(
             evt_number=evt_idx,
@@ -321,6 +375,7 @@ class HexdumpEventSource:
             light_channels=light_channels,
             trigger_ticks=trigger_ticks,
             trigger_abs=trigger_abs,
+            trigger_meta=used_meta,
         )
         _EVENT_CACHE[key] = record
         return record

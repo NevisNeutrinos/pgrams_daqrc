@@ -25,6 +25,16 @@ TAB_BTN = {
     "fontSize": "13px",
 }
 TAB_BTN_ACTIVE = {**TAB_BTN, "background": "#2563eb", "color": "#fff", "borderColor": "#2563eb"}
+STEP_BTN = {
+    "padding": "0",
+    "width": "18px",
+    "height": "12px",
+    "lineHeight": "10px",
+    "fontSize": "8px",
+    "border": "1px solid #bbb",
+    "background": "#f5f5f5",
+    "cursor": "pointer",
+}
 PANEL_HIDE = {"display": "none"}
 PANEL_SHOW = {"display": "block"}
 from data_monitoring.plot_utils import (
@@ -67,6 +77,56 @@ Q_SLOTS = Q_SLOTS_DEFAULT
 LIGHT_SLOT = LIGHT_SLOT_DEFAULT
 FEM_SLOTS = Q_SLOTS + [LIGHT_SLOT]
 CHANNELS_PER_QFEM = 64
+LIGHT_FRAME_MOD = 8
+
+ERR_STYLE = {"color": "#d00", "fontWeight": "bold"}
+
+
+def _err(msg: str) -> html.Span:
+    """Render an error/warning status message in red."""
+    return html.Span(msg, style=ERR_STYLE)
+
+
+def _parse_lag(raw) -> tuple[int, int]:
+    """Parse a lag input into (header_lag, adc_lag).
+
+    A single number ("1") shifts both header and ADC. A pair ("1,0") shifts the
+    header and ADC independently. Blank/invalid -> (0, 0).
+    """
+    if raw is None:
+        return (0, 0)
+    parts = [p.strip() for p in str(raw).split(",") if p.strip() != ""]
+    try:
+        if not parts:
+            return (0, 0)
+        if len(parts) == 1:
+            v = int(parts[0])
+            return (v, v)
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return (0, 0)
+
+
+def _fmt_lag(lag: tuple[int, int]) -> str:
+    h, a = lag
+    return f"{h:+d}" if h == a else f"({h:+d},{a:+d})"
+
+
+def _header_match_warnings(record: EventRecord) -> list[str]:
+    """Flag FEMHeader6 trigger desync. L-FEM frame is mod-8, so Q/L frames are
+    compared modulo 8. Cheap (a few int compares per Load), no perf impact."""
+    tm = getattr(record, "trigger_meta", None) or {}
+    warns: list[str] = []
+    q_present = [s for s in Q_SLOTS if s in tm]
+    if len(q_present) >= 2:
+        q_keys = {(tm[s]["frame"], tm[s]["sample"]) for s in q_present}
+        if len(q_keys) > 1:
+            warns.append("Q-FEM headers not match")
+    if q_present and LIGHT_SLOT in tm:
+        q, l = tm[q_present[0]], tm[LIGHT_SLOT]
+        if (q["frame"] % LIGHT_FRAME_MOD) != (l["frame"] % LIGHT_FRAME_MOD) or q["sample"] != l["sample"]:
+            warns.append("Q-FEM and L-FEM header not match")
+    return warns
 
 
 def _slice_q_lbw(lbw_q: tuple | None, slot_idx: int) -> tuple[list, list, list] | None:
@@ -105,6 +165,16 @@ class DqmWeb:
         self.freeze_live = False
 
         self.app = dash.Dash(__name__, suppress_callback_exceptions=True)
+        # Hide the browser's native number spinner on Evt# so our custom in-box
+        # up/down arrows are the only stepper.
+        self.app.index_string = self.app.index_string.replace(
+            "{%css%}",
+            "{%css%}\n<style>"
+            "#evt-input::-webkit-outer-spin-button,"
+            "#evt-input::-webkit-inner-spin-button"
+            "{-webkit-appearance:none;margin:0;}"
+            "</style>",
+        )
         self.app.layout = self._build_layout()
         self._register_callbacks()
 
@@ -222,8 +292,34 @@ class DqmWeb:
                             value=DEFAULT_HEX_FILE, style={"width": "260px"},
                         ),
                         html.Label("Evt#:"),
-                        dcc.Input(id="evt-input", type="number", value=0, min=0, step=1,
-                                  style={"width": "72px"}),
+                        html.Div(
+                            style={"position": "relative", "width": "72px",
+                                   "display": "inline-block"},
+                            children=[
+                                dcc.Input(
+                                    id="evt-input", type="number", value=0, min=0, step=1,
+                                    style={"width": "100%", "paddingRight": "18px",
+                                           "boxSizing": "border-box",
+                                           "MozAppearance": "textfield"},
+                                ),
+                                html.Div(
+                                    style={"position": "absolute", "right": "1px",
+                                           "top": "1px", "bottom": "1px",
+                                           "display": "flex", "flexDirection": "column",
+                                           "justifyContent": "center"},
+                                    children=[
+                                        html.Button("\u25b2", id="evt-up", n_clicks=0, style=STEP_BTN),
+                                        html.Button("\u25bc", id="evt-down", n_clicks=0, style=STEP_BTN),
+                                    ],
+                                ),
+                            ],
+                        ),
+                        html.Label("Q lag:", title="header_lag,adc_lag (e.g. '1' shifts both, '1,0' shifts header only). header_lag picks the FEMHeader6 event; adc_lag picks the charge-ADC event."),
+                        dcc.Input(id="qlag-input", type="text", value="",
+                                  placeholder="0,0", style={"width": "56px"}),
+                        html.Label("L lag:", title="header_lag,adc_lag (e.g. '1' shifts both, '1,0' shifts header only). header_lag picks the L-FEM FEMHeader6 (trigger/ROI remap) event; adc_lag picks the light-ROI event."),
+                        dcc.Input(id="llag-input", type="text", value="",
+                                  placeholder="0,0", style={"width": "56px"}),
                         html.Button("Load", id="load-btn", n_clicks=0),
                         html.Div(id="status-msg", style={"color": "#666", "fontSize": "12px"}),
                         html.Div(
@@ -443,6 +539,18 @@ class DqmWeb:
         return evt_label, heatmaps, lbw_figs
 
     def _register_callbacks(self):
+        @self.app.callback(
+            Output("evt-input", "value"),
+            [Input("evt-up", "n_clicks"), Input("evt-down", "n_clicks")],
+            State("evt-input", "value"),
+            prevent_initial_call=True,
+        )
+        def step_evt(_up, _down, val):
+            val = int(val or 0)
+            if dash.callback_context.triggered_id == "evt-up":
+                return val + 1
+            return max(0, val - 1)
+
         figure_outputs = [Output("evt-label", "children")]
         figure_outputs += [Output(f"qfem-slot-{s}", "figure") for s in Q_SLOTS]
         figure_outputs += [Output("lfem-heatmap", "figure")]
@@ -456,28 +564,41 @@ class DqmWeb:
                 State("pause-check", "value"),
                 State("file-path", "value"),
                 State("evt-input", "value"),
+                State("qlag-input", "value"),
+                State("llag-input", "value"),
             ],
         )
-        def refresh(_, _load_clicks, pause_val, file_path, evt_idx):
+        def refresh(_, _load_clicks, pause_val, file_path, evt_idx, q_lag, l_lag):
             triggered = dash.callback_context.triggered_id
             status = no_update
             pause_out = no_update
 
             if triggered == "load-btn":
                 if not file_path:
-                    return (*((no_update,) * len(figure_outputs)), no_update, "no file path")
+                    return (*((no_update,) * len(figure_outputs)), no_update, _err("no file path"))
                 try:
                     evt_idx = int(evt_idx or 0)
-                    record = load_event(file_path.strip(), evt_idx, source="hexdump")
+                    q_lag = _parse_lag(q_lag)
+                    l_lag = _parse_lag(l_lag)
+                    record = load_event(
+                        file_path.strip(), evt_idx, source="hexdump",
+                        q_lag=q_lag, l_lag=l_lag,
+                    )
                     self.load_event_record(record)
                     qx = record.trigger_ticks.get(Q_SLOTS[0], "?")
+                    lag_note = ""
+                    if any(q_lag) or any(l_lag):
+                        lag_note = f" | lag Q{_fmt_lag(q_lag)} L{_fmt_lag(l_lag)}"
                     status = (
                         f"loaded evt {evt_idx} | trigger abs={record.trigger_abs} "
-                        f"Q x={qx} (auto-paused)"
+                        f"Q x={qx}{lag_note} (auto-paused)"
                     )
+                    warns = _header_match_warnings(record)
+                    if warns:
+                        status = [status] + [_err("  ⚠ " + w) for w in warns]
                     pause_out = ["pause"]
                 except Exception as exc:
-                    return (*((no_update,) * len(figure_outputs)), no_update, f"load failed: {exc}")
+                    return (*((no_update,) * len(figure_outputs)), no_update, _err(f"load failed: {exc}"))
             elif pause_val and "pause" in pause_val:
                 return (
                     *((no_update,) * len(figure_outputs)),
