@@ -25,6 +25,10 @@ Q_PRETRIGGER_SAMPLES = 256
 LIGHT_FRAME_MOD = 8
 LIGHT_TICKS_PER_FRAME = 8192
 Q_SAMPLE_TO_LIGHT_TICK = LIGHT_TICKS_PER_FRAME // SAMPLES_PER_FRAME  # 2 MHz -> 64 MHz
+# Light readout window = 4 frames [trig_frame-1 .. trig_frame+2]. A ROI whose
+# frame_num lands outside this window cannot belong to this trigger (stale /
+# duplicated light data), so it is flagged for the UI.
+LIGHT_WINDOW_FRAMES = 4
 
 _EVENT_OFFSET_CACHE: dict[str, list[int]] = {}
 _EVENT_CACHE: dict[tuple, EventRecord] = {}
@@ -42,6 +46,10 @@ class EventRecord:
     # Per-slot decoded FEMHeader6 trigger: {slot: {"frame","sample","abs"}}.
     # Kept so the UI can flag Q/L (or Q/Q) header desync.
     trigger_meta: dict[int, dict] = field(default_factory=dict)
+    # L-FEM ROIs whose frame_num falls outside the 4-frame readout window of the
+    # (lag-adjusted) L header vs total ROIs -> flags stale/duplicate light data.
+    light_roi_oow: int = 0
+    light_roi_total: int = 0
 
 
 class EventSource(Protocol):
@@ -349,6 +357,8 @@ class HexdumpEventSource:
         # frame_num is mod-8: map the 4-frame window [trig_frame-1 .. trig_frame+2]
         # with the -1 frame at tick 0; start_sample (0..8191) is the 64 MHz position
         # within its frame.
+        light_roi_oow = 0
+        light_roi_total = 0
         l_trig = l_meta.get(self.light_slot) or base_meta.get(self.light_slot)
         if l_trig is not None:
             trig_frame = l_trig["frame"]
@@ -358,6 +368,11 @@ class HexdumpEventSource:
                 for roi in rois:
                     local_frame = (roi["frame_num"] - earliest_frame) % LIGHT_FRAME_MOD
                     roi["start_sample"] += local_frame * LIGHT_TICKS_PER_FRAME
+                    light_roi_total += 1
+                    # local_frame in [0..3] is inside the window; >=4 means the ROI
+                    # cannot belong to this trigger (stale/duplicate light).
+                    if local_frame >= LIGHT_WINDOW_FRAMES:
+                        light_roi_oow += 1
             # trig_frame maps to local frame 1; convert 2 MHz sample to ticks.
             trigger_ticks[self.light_slot] = (
                 LIGHT_TICKS_PER_FRAME + trig_sample * Q_SAMPLE_TO_LIGHT_TICK
@@ -376,6 +391,8 @@ class HexdumpEventSource:
             trigger_ticks=trigger_ticks,
             trigger_abs=trigger_abs,
             trigger_meta=used_meta,
+            light_roi_oow=light_roi_oow,
+            light_roi_total=light_roi_total,
         )
         _EVENT_CACHE[key] = record
         return record

@@ -126,6 +126,13 @@ def _header_match_warnings(record: EventRecord) -> list[str]:
         q, l = tm[q_present[0]], tm[LIGHT_SLOT]
         if (q["frame"] % LIGHT_FRAME_MOD) != (l["frame"] % LIGHT_FRAME_MOD) or q["sample"] != l["sample"]:
             warns.append("Q-FEM and L-FEM header not match")
+    # ROIs whose frame_num falls outside the L header's 4-frame readout window
+    # cannot belong to this trigger -> stale/duplicate light data. This fires even
+    # when a lag makes the headers match, flagging the event as still corrupt.
+    oow = getattr(record, "light_roi_oow", 0)
+    if oow > 0:
+        total = getattr(record, "light_roi_total", 0)
+        warns.append(f"{oow}/{total} L-FEM ROIs outside trigger window (stale/duplicate light?)")
     return warns
 
 
@@ -163,6 +170,9 @@ class DqmWeb:
         self.light_channels: dict[int, list[dict]] = {}
         self.trigger_ticks: dict[int, int] = {}
         self.freeze_live = False
+        # Bumped after each explicit load/step so figure callbacks rebuild from the
+        # freshly loaded snapshot (serializes load -> build, avoids races).
+        self._load_seq = 0
 
         self.app = dash.Dash(__name__, suppress_callback_exceptions=True)
         # Hide the browser's native number spinner on Evt# so our custom in-box
@@ -349,6 +359,7 @@ class DqmWeb:
                     children=[self._placeholder_tab("Event display (charge 2D / light 3D reconstruction)")],
                 ),
                 dcc.Store(id="active-tab", data="heat"),
+                dcc.Store(id="event-version", data=0),
                 dcc.Interval(id="update-interval", interval=2000, n_intervals=0),
             ],
         )
@@ -539,27 +550,31 @@ class DqmWeb:
         return evt_label, heatmaps, lbw_figs
 
     def _register_callbacks(self):
-        @self.app.callback(
-            Output("evt-input", "value"),
-            [Input("evt-up", "n_clicks"), Input("evt-down", "n_clicks")],
-            State("evt-input", "value"),
-            prevent_initial_call=True,
-        )
-        def step_evt(_up, _down, val):
-            val = int(val or 0)
-            if dash.callback_context.triggered_id == "evt-up":
-                return val + 1
-            return max(0, val - 1)
-
         figure_outputs = [Output("evt-label", "children")]
         figure_outputs += [Output(f"qfem-slot-{s}", "figure") for s in Q_SLOTS]
         figure_outputs += [Output("lfem-heatmap", "figure")]
         for slot in FEM_SLOTS:
             figure_outputs.append(Output(f"lbw-{slot}", "figure"))
 
+        # The up/down arrows step Evt# AND load immediately; typing into the box
+        # still requires the Load button. refresh owns Evt#'s value so it can
+        # write back the stepped index.
+        load_triggers = ("load-btn", "evt-up", "evt-down")
+
         @self.app.callback(
-            figure_outputs + [Output("pause-check", "value"), Output("status-msg", "children")],
-            [Input("update-interval", "n_intervals"), Input("load-btn", "n_clicks")],
+            figure_outputs
+            + [
+                Output("pause-check", "value"),
+                Output("status-msg", "children"),
+                Output("evt-input", "value"),
+                Output("event-version", "data"),
+            ],
+            [
+                Input("update-interval", "n_intervals"),
+                Input("load-btn", "n_clicks"),
+                Input("evt-up", "n_clicks"),
+                Input("evt-down", "n_clicks"),
+            ],
             [
                 State("pause-check", "value"),
                 State("file-path", "value"),
@@ -568,16 +583,23 @@ class DqmWeb:
                 State("llag-input", "value"),
             ],
         )
-        def refresh(_, _load_clicks, pause_val, file_path, evt_idx, q_lag, l_lag):
+        def refresh(_, _load_clicks, _up, _down, pause_val, file_path, evt_idx, q_lag, l_lag):
             triggered = dash.callback_context.triggered_id
             status = no_update
             pause_out = no_update
+            evt_out = no_update
+            ver_out = no_update
 
-            if triggered == "load-btn":
+            if triggered in load_triggers:
                 if not file_path:
-                    return (*((no_update,) * len(figure_outputs)), no_update, _err("no file path"))
+                    return (*((no_update,) * len(figure_outputs)), no_update, _err("no file path"), no_update, no_update)
                 try:
                     evt_idx = int(evt_idx or 0)
+                    if triggered == "evt-up":
+                        evt_idx += 1
+                    elif triggered == "evt-down":
+                        evt_idx = max(0, evt_idx - 1)
+                    evt_out = evt_idx
                     q_lag = _parse_lag(q_lag)
                     l_lag = _parse_lag(l_lag)
                     record = load_event(
@@ -597,17 +619,24 @@ class DqmWeb:
                     if warns:
                         status = [status] + [_err("  ⚠ " + w) for w in warns]
                     pause_out = ["pause"]
+                    self._load_seq += 1
+                    ver_out = self._load_seq
                 except Exception as exc:
-                    return (*((no_update,) * len(figure_outputs)), no_update, _err(f"load failed: {exc}"))
-            elif pause_val and "pause" in pause_val:
+                    return (*((no_update,) * len(figure_outputs)), no_update, _err(f"load failed: {exc}"), no_update, no_update)
+            elif self.is_frozen():
+                # Frozen on a loaded event: live-interval ticks must not overwrite
+                # it. Check the live backend flag (not the stale pause_val State),
+                # so an interval racing a just-finished Load can't clobber it.
                 return (
                     *((no_update,) * len(figure_outputs)),
+                    no_update,
+                    no_update,
                     no_update,
                     no_update,
                 )
 
             evt_label, heatmaps, lbw_figs = self._build_figures()
-            return (evt_label, *heatmaps, *lbw_figs, pause_out, status)
+            return (evt_label, *heatmaps, *lbw_figs, pause_out, status, evt_out, ver_out)
 
         @self.app.callback(
             Output("status-msg", "children", allow_duplicate=True),
@@ -624,6 +653,15 @@ class DqmWeb:
             if ms is None or ms < 200:
                 return 2000
             return int(ms)
+
+        @self.app.callback(
+            Output("update-interval", "disabled"),
+            Input("pause-check", "value"),
+        )
+        def toggle_interval(pause_val):
+            # Stop live ticks entirely while frozen so they can't race/overwrite
+            # offline browsing (Load / step arrows / channel selection).
+            return bool(pause_val and "pause" in pause_val)
 
         @self.app.callback(
             [
@@ -668,10 +706,10 @@ class DqmWeb:
                 Input("active-tab", "data"),
                 Input("qdetail-slot", "value"),
                 Input("qdetail-channels", "value"),
-                Input("load-btn", "n_clicks"),
+                Input("event-version", "data"),
             ],
         )
-        def q_waveforms(_n, tab, slot, chan_str, _load):
+        def q_waveforms(_n, tab, slot, chan_str, _ver):
             if tab != "q":
                 return no_update
             if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
@@ -691,10 +729,10 @@ class DqmWeb:
             [
                 Input("update-interval", "n_intervals"),
                 Input("active-tab", "data"),
-                Input("load-btn", "n_clicks"),
+                Input("event-version", "data"),
             ],
         )
-        def l_waveforms(_n, tab, _load):
+        def l_waveforms(_n, tab, _ver):
             if tab != "l":
                 return no_update
             if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
