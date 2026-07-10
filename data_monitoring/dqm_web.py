@@ -298,7 +298,7 @@ class DqmWeb:
                         ),
                         html.Label("File:"),
                         dcc.Input(
-                            id="file-path", type="text", placeholder="hexdump .txt path",
+                            id="file-path", type="text", placeholder="hexdump .txt or .dat path",
                             value=DEFAULT_HEX_FILE, style={"width": "260px"},
                         ),
                         html.Label("Evt#:"),
@@ -582,6 +582,9 @@ class DqmWeb:
                 State("qlag-input", "value"),
                 State("llag-input", "value"),
             ],
+            running=[
+                (Output("status-msg", "children"), "Loading data file...", True),
+            ],
         )
         def refresh(_, _load_clicks, _up, _down, pause_val, file_path, evt_idx, q_lag, l_lag):
             triggered = dash.callback_context.triggered_id
@@ -603,7 +606,7 @@ class DqmWeb:
                     q_lag = _parse_lag(q_lag)
                     l_lag = _parse_lag(l_lag)
                     record = load_event(
-                        file_path.strip(), evt_idx, source="hexdump",
+                        file_path.strip(), evt_idx, source="auto",
                         q_lag=q_lag, l_lag=l_lag,
                     )
                     self.load_event_record(record)

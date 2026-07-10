@@ -1,8 +1,10 @@
-"""Event loaders: EventRecord + hexdump .txt decoder (charge_light_decoder.h layout)."""
+"""Event loaders: EventRecord + hexdump .txt / binary .dat decoder."""
 
 from __future__ import annotations
 
+import mmap
 import os
+import struct
 from dataclasses import dataclass, field
 from typing import Iterable, Protocol
 
@@ -30,7 +32,6 @@ Q_SAMPLE_TO_LIGHT_TICK = LIGHT_TICKS_PER_FRAME // SAMPLES_PER_FRAME  # 2 MHz -> 
 # duplicated light data), so it is flagged for the UI.
 LIGHT_WINDOW_FRAMES = 4
 
-_EVENT_OFFSET_CACHE: dict[str, list[int]] = {}
 _EVENT_CACHE: dict[tuple, EventRecord] = {}
 
 
@@ -80,11 +81,21 @@ def get_source(name: str) -> EventSource:
 def load_event(
     path: str,
     evt_idx: int,
-    source: str = "hexdump",
+    source: str = "auto",
     q_lag: tuple[int, int] = (0, 0),
     l_lag: tuple[int, int] = (0, 0),
 ) -> EventRecord:
+    if source == "auto":
+        source = infer_source(path)
     return get_source(source).load(path, evt_idx, q_lag=q_lag, l_lag=l_lag)
+
+
+def infer_source(path: str) -> str:
+    """Pick reader from file extension (.dat/.bin -> binary, else hexdump txt)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".dat", ".bin"):
+        return "binary"
+    return "hexdump"
 
 
 # --- hexdump decoder ---
@@ -125,28 +136,109 @@ def parse_trig_from_header6(w: int) -> tuple[int, int, int]:
     return trig_frame, sample, tick
 
 
-def build_event_offset_index(txt_path: str) -> list[int]:
-    if txt_path in _EVENT_OFFSET_CACHE:
-        return _EVENT_OFFSET_CACHE[txt_path]
-    offsets: list[int] = []
-    pos = 0
-    with open(txt_path, "rb") as f:
-        for line in f:
-            if line[:8] == b"ffffffff":
-                offsets.append(pos)
-            pos += len(line)
-    _EVENT_OFFSET_CACHE[txt_path] = offsets
-    print(f"indexed {len(offsets)} events in {os.path.basename(txt_path)}")
+EVENT_MARKER = 0xFFFFFFFF
+EVENT_END = 0xE0000000
+_HEX_LINE_MARKER = b"ffffffff\n"
+_BIN_MARKER = struct.pack("<I", EVENT_MARKER)  # native LE 32-bit words on disk
+
+# path -> ("hextxt"|"binary", list of byte offsets to each event's 0xFFFFFFFF)
+_EVENT_INDEX_CACHE: dict[str, tuple[str, list[int]]] = {}
+
+
+def _file_kind(path: str) -> str:
+    return "binary" if os.path.splitext(path)[1].lower() in (".dat", ".bin") else "hextxt"
+
+
+def build_event_offset_index(path: str) -> list[int]:
+    """Return byte offsets of each event's 0xFFFFFFFF marker (cached)."""
+    kind, offsets = _get_event_index(path)
     return offsets
 
 
-def get_event_payloads(
-    txt_path: str, evt_idx: int, all_slots: list[int]
-) -> tuple[dict[int, list[int]], dict[int, dict]]:
-    offsets = build_event_offset_index(txt_path)
+def _get_event_index(path: str) -> tuple[str, list[int]]:
+    if path in _EVENT_INDEX_CACHE:
+        return _EVENT_INDEX_CACHE[path]
+    kind = _file_kind(path)
+    if kind == "binary":
+        offsets = _index_binary(path)
+    else:
+        offsets = _index_hextxt(path)
+    _EVENT_INDEX_CACHE[path] = (kind, offsets)
+    print(f"indexed {len(offsets)} events in {os.path.basename(path)} ({kind})")
+    return kind, offsets
+
+
+def _index_hextxt(path: str) -> list[int]:
+    """mmap scan for 'ffffffff\\n' line starts — much faster than a Python line loop."""
+    offsets: list[int] = []
+    with open(path, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        pos = 0
+        while pos < mm.size():
+            i = mm.find(_HEX_LINE_MARKER, pos)
+            if i < 0:
+                break
+            offsets.append(i)
+            pos = i + len(_HEX_LINE_MARKER)
+        mm.close()
+    return offsets
+
+
+def _index_binary(path: str) -> list[int]:
+    """mmap scan for big-endian 0xFFFFFFFF words."""
+    offsets: list[int] = []
+    with open(path, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        pos = 0
+        while pos <= mm.size() - 4:
+            i = mm.find(_BIN_MARKER, pos)
+            if i < 0:
+                break
+            offsets.append(i)
+            pos = i + 4
+        mm.close()
+    return offsets
+
+
+def _read_event_words(path: str, evt_idx: int) -> list[int]:
+    kind, offsets = _get_event_index(path)
     if not 0 <= evt_idx < len(offsets):
         raise IndexError(f"evt {evt_idx} out of range (have {len(offsets)} events)")
+    start = offsets[evt_idx]
+    end = offsets[evt_idx + 1] if evt_idx + 1 < len(offsets) else None
+    if kind == "binary":
+        return _read_words_binary(path, start, end)
+    return _read_words_hextxt(path, start, end)
 
+
+def _read_words_hextxt(path: str, start: int, end: int | None) -> list[int]:
+    with open(path, "rb") as f:
+        f.seek(start)
+        data = f.read((end - start) if end is not None else -1)
+    words: list[int] = []
+    for line in data.splitlines():
+        s = line.strip()
+        if s:
+            words.append(int(s, 16))
+    return words
+
+
+def _read_words_binary(path: str, start: int, end: int | None) -> list[int]:
+    """Read native little-endian 32-bit words (Linux/XMIT PCIe readout byte order)."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        nbytes = (end - start) if end is not None else -1
+        data = f.read(nbytes)
+    nwords = len(data) // 4
+    if nwords == 0:
+        return []
+    return list(struct.unpack(f"<{nwords}I", data[: nwords * 4]))
+
+
+def parse_event_payloads(
+    words: Iterable[int], all_slots: list[int]
+) -> tuple[dict[int, list[int]], dict[int, dict]]:
+    """Walk one event's 32-bit word stream and extract per-slot payloads + headers."""
     out: dict[int, list[int]] = {}
     trigger_meta: dict[int, dict] = {}
     hdr_idx = 6
@@ -154,39 +246,41 @@ def get_event_payloads(
     target_set = set(all_slots)
     started = False
 
-    with open(txt_path) as f:
-        f.seek(offsets[evt_idx])
-        for line in f:
-            w = parse_hex(line)
-            if w is None:
-                continue
-            if w == 0xFFFFFFFF:
-                if started:
-                    break
-                started = True
-                continue
-            if w == 0xE0000000:
+    for w in words:
+        if w == EVENT_MARKER:
+            if started:
                 break
-            lo, hi = lo16(w), hi16(w)
-            is_hdr = (lo & 0xF000) == 0xF000 and (hi & 0xF000) == 0xF000
-            if is_hdr:
-                hdr_idx = 1 if hdr_idx >= 6 else hdr_idx + 1
-                if hdr_idx == 1:
-                    current_slot = hi & 0x1F
-                    if current_slot in target_set and current_slot not in out:
-                        out[current_slot] = []
-                elif hdr_idx == 6 and current_slot in target_set:
-                    fr, smp, tick_abs = parse_trig_from_header6(w)
-                    trigger_meta[current_slot] = {
-                        "frame": fr,
-                        "sample": smp,
-                        "abs": tick_abs,
-                    }
-                continue
-            if current_slot in out:
-                out[current_slot].append(w)
+            started = True
+            continue
+        if w == EVENT_END:
+            break
+        lo, hi = lo16(w), hi16(w)
+        is_hdr = (lo & 0xF000) == 0xF000 and (hi & 0xF000) == 0xF000
+        if is_hdr:
+            hdr_idx = 1 if hdr_idx >= 6 else hdr_idx + 1
+            if hdr_idx == 1:
+                current_slot = hi & 0x1F
+                if current_slot in target_set and current_slot not in out:
+                    out[current_slot] = []
+            elif hdr_idx == 6 and current_slot in target_set:
+                fr, smp, tick_abs = parse_trig_from_header6(w)
+                trigger_meta[current_slot] = {
+                    "frame": fr,
+                    "sample": smp,
+                    "abs": tick_abs,
+                }
+            continue
+        if current_slot in out:
+            out[current_slot].append(w)
 
     return out, trigger_meta
+
+
+def get_event_payloads(
+    path: str, evt_idx: int, all_slots: list[int]
+) -> tuple[dict[int, list[int]], dict[int, dict]]:
+    words = _read_event_words(path, evt_idx)
+    return parse_event_payloads(words, all_slots)
 
 
 def decode_charge(payload32: list[int]) -> dict[int, np.ndarray]:
@@ -282,8 +376,8 @@ def decode_light(payload32: list[int]) -> dict[int, list[dict]]:
     return out
 
 
-class HexdumpEventSource:
-    name = "hexdump"
+class _PgramsFileEventSource:
+    """Load events from hexdump .txt or raw big-endian .dat (auto-detected per path)."""
 
     def __init__(
         self,
@@ -398,4 +492,13 @@ class HexdumpEventSource:
         return record
 
 
+class HexdumpEventSource(_PgramsFileEventSource):
+    name = "hexdump"
+
+
+class BinaryEventSource(_PgramsFileEventSource):
+    name = "binary"
+
+
 register_source(HexdumpEventSource())
+register_source(BinaryEventSource())
