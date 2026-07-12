@@ -37,6 +37,14 @@ STEP_BTN = {
 }
 PANEL_HIDE = {"display": "none"}
 PANEL_SHOW = {"display": "block"}
+HEATMAP_GRAPH_CONFIG = {
+    "displayModeBar": False,
+    "doubleClick": "reset+autosize",
+}
+WF_GRAPH_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+}
 from data_monitoring.plot_utils import (
     HEATMAP_HEIGHT,
     compute_charge_lbw,
@@ -169,6 +177,7 @@ class DqmWeb:
         self.charge_slots: dict[int, dict[int, np.ndarray]] = {s: {} for s in Q_SLOTS}
         self.light_channels: dict[int, list[dict]] = {}
         self.trigger_ticks: dict[int, int] = {}
+        self.trigger_meta: dict[int, dict] = {}
         self.freeze_live = False
         # Bumped after each explicit load/step so figure callbacks rebuild from the
         # freshly loaded snapshot (serializes load -> build, avoids races).
@@ -176,7 +185,13 @@ class DqmWeb:
 
         self.app = dash.Dash(__name__, suppress_callback_exceptions=True)
         # Hide the browser's native number spinner on Evt# so our custom in-box
-        # up/down arrows are the only stepper.
+        # up/down arrows are the only stepper. Also patch Plotly so:
+        # - Reset / odd double-click: x -> meta.full_x_range (waveforms) or
+        #   meta.default_ranges x (heatmaps); y stays at default_ranges y
+        # - Autoscale / even double-click: when meta.autoscale_to_default,
+        #   restore meta.default_ranges (L-FEM) instead of a raw data fit.
+        # Modebar + double-click use Registry _guiRelayout (not Plotly.relayout),
+        # so we re-register that API method.
         self.app.index_string = self.app.index_string.replace(
             "{%css%}",
             "{%css%}\n<style>"
@@ -184,6 +199,120 @@ class DqmWeb:
             "#evt-input::-webkit-inner-spin-button"
             "{-webkit-appearance:none;margin:0;}"
             "</style>",
+        ).replace(
+            "</body>",
+            """
+<script>
+(function () {
+  function metaOf(gd) {
+    return (gd && gd.layout && gd.layout.meta) || null;
+  }
+  function defaultRanges(gd) {
+    var m = metaOf(gd);
+    return (m && m.default_ranges) || null;
+  }
+  // Lock Plotly's Reset / odd-double-click targets from layout.meta.
+  function applyResetTarget(gd) {
+    var m = metaOf(gd);
+    if (!m) return;
+    var fl = gd._fullLayout;
+    if (!fl) return;
+    var full = m.full_x_range;
+    var dr = m.default_ranges || {};
+    Object.keys(fl).forEach(function (k) {
+      var ax = fl[k];
+      if (!ax) return;
+      if (k === "xaxis" || /^xaxis\\d+$/.test(k)) {
+        if (full && full.length >= 2) {
+          ax._rangeInitial0 = full[0];
+          ax._rangeInitial1 = full[1];
+        } else if (dr[k] && dr[k].length >= 2) {
+          ax._rangeInitial0 = dr[k][0];
+          ax._rangeInitial1 = dr[k][1];
+        }
+      } else if (k === "yaxis" || /^yaxis\\d+$/.test(k)) {
+        // Keep y at the curated default on Reset (don't follow guide-line traces).
+        if (dr[k] && dr[k].length >= 2) {
+          ax._rangeInitial0 = dr[k][0];
+          ax._rangeInitial1 = dr[k][1];
+        }
+      }
+    });
+  }
+  function buildDefaultUpdate(gd) {
+    var dr = defaultRanges(gd);
+    if (!dr) return null;
+    var update = {};
+    Object.keys(dr).forEach(function (ax) {
+      update[ax + ".range"] = dr[ax].slice();
+      update[ax + ".autorange"] = false;
+    });
+    return update;
+  }
+  function isPureAutoscale(update) {
+    if (!update || typeof update !== "object" || Array.isArray(update)) return false;
+    var keys = Object.keys(update);
+    if (!keys.length) return false;
+    return keys.every(function (k) {
+      return /\\.autorange$/.test(k) && update[k] === true;
+    });
+  }
+  function maybeRemapAutoscale(gd, update) {
+    var m = metaOf(gd);
+    if (!(m && m.autoscale_to_default && isPureAutoscale(update))) return update;
+    return buildDefaultUpdate(gd) || update;
+  }
+  function afterPlot(gd) {
+    applyResetTarget(gd);
+  }
+  function wrapPlot(name) {
+    if (!Plotly[name] || Plotly[name]._pgramsWrapped) return;
+    var orig = Plotly[name];
+    function wrapped(gd) {
+      var ret = orig.apply(this, arguments);
+      Promise.resolve(ret).then(function () { afterPlot(gd); });
+      return ret;
+    }
+    wrapped._pgramsWrapped = true;
+    Plotly[name] = wrapped;
+  }
+  function wrapGuiRelayout() {
+    if (Plotly._pgramsGuiRelayoutWrapped) return;
+    if (typeof Plotly.register !== "function" || typeof Plotly.relayout !== "function") return;
+    Plotly._pgramsGuiRelayoutWrapped = true;
+    // Modebar Autoscale + double-click go through Registry "_guiRelayout",
+    // which keeps its own fn reference — re-register to intercept.
+    Plotly.register({
+      moduleType: "apiMethod",
+      name: "_guiRelayout",
+      fn: function (gd, update) {
+        if (gd && gd._fullLayout) gd._fullLayout._guiEditing = true;
+        try {
+          if (arguments.length > 2) {
+            return Plotly.relayout(gd, arguments[1], arguments[2]);
+          }
+          if (typeof update === "object" && update !== null && !Array.isArray(update)) {
+            update = maybeRemapAutoscale(gd, update);
+          }
+          return Plotly.relayout(gd, update);
+        } finally {
+          if (gd && gd._fullLayout) gd._fullLayout._guiEditing = false;
+          // Re-assert Reset targets; some Plotly paths refresh axis internals.
+          applyResetTarget(gd);
+        }
+      },
+    });
+  }
+  function ready() {
+    if (typeof Plotly === "undefined") { setTimeout(ready, 50); return; }
+    wrapPlot("react");
+    wrapPlot("newPlot");
+    wrapGuiRelayout();
+  }
+  ready();
+})();
+</script>
+</body>""",
         )
         self.app.layout = self._build_layout()
         self._register_callbacks()
@@ -201,7 +330,7 @@ class DqmWeb:
             children=[
                 dcc.Graph(
                     id=heat_id,
-                    config={"displayModeBar": False},
+                    config=HEATMAP_GRAPH_CONFIG,
                     style={"height": f"{HEATMAP_HEIGHT}px"},
                 ),
                 dcc.Graph(
@@ -251,7 +380,7 @@ class DqmWeb:
                         html.Span("(0\u201363, any number)", style={"color": "#888", "fontSize": "12px"}),
                     ],
                 ),
-                dcc.Graph(id="qdetail-graph", style={"width": "96%"}),
+                dcc.Graph(id="qdetail-graph", style={"width": "96%"}, config=WF_GRAPH_CONFIG),
             ],
         )
 
@@ -262,7 +391,7 @@ class DqmWeb:
                     "Full-window overlay (top) + each responding channel zoomed to its ROI(s).",
                     style={"color": "#888", "fontSize": "12px", "margin": "8px 0"},
                 ),
-                dcc.Graph(id="ldetail-graph", style={"width": "96%"}),
+                dcc.Graph(id="ldetail-graph", style={"width": "96%"}, config=WF_GRAPH_CONFIG),
             ],
         )
 
@@ -376,6 +505,7 @@ class DqmWeb:
             self.charge_slots = {s: {} for s in Q_SLOTS}
             self.light_channels = {}
             self.trigger_ticks = {}
+            self.trigger_meta = {}
 
     def _maybe_roll_event(self, evt_number: int | None):
         if self.freeze_live:
@@ -385,6 +515,7 @@ class DqmWeb:
             self.charge_slots = {s: {} for s in Q_SLOTS}
             self.light_channels = {}
             self.trigger_ticks = {}
+            self.trigger_meta = {}
 
     def load_event_record(self, record: EventRecord):
         with self._lock:
@@ -405,6 +536,7 @@ class DqmWeb:
                 for ch, rois in record.light_channels.items()
             }
             self.trigger_ticks = dict(record.trigger_ticks)
+            self.trigger_meta = dict(getattr(record, "trigger_meta", None) or {})
             self.lbw_charge = compute_charge_lbw(self.charge_slots, Q_SLOTS)
             self.lbw_light = compute_light_lbw(self.light_channels)
 
@@ -501,14 +633,22 @@ class DqmWeb:
                 ]
                 for ch, rois in self.light_channels.items()
             }
-            return self.evt_number, charge, light, self.lbw_charge, self.lbw_light, dict(self.trigger_ticks)
+            return (
+                self.evt_number,
+                charge,
+                light,
+                self.lbw_charge,
+                self.lbw_light,
+                dict(self.trigger_ticks),
+                dict(self.trigger_meta),
+            )
 
     @staticmethod
     def _empty():
         return go.Figure()
 
     def _build_figures(self):
-        evt, charge_slots, light, lbw_q, lbw_l, triggers = self._snapshot()
+        evt, charge_slots, light, lbw_q, lbw_l, triggers, tmeta = self._snapshot()
         evt_label = f"event: {evt if evt is not None else '--'}"
 
         heatmaps = [
@@ -516,6 +656,7 @@ class DqmWeb:
                 charge_slots.get(slot, {}),
                 title=f"Q-FEM slot {slot}",
                 trigger_x=triggers.get(slot),
+                trig_sample=(tmeta.get(slot) or {}).get("sample"),
             )
             for slot in Q_SLOTS
         ]
@@ -717,7 +858,7 @@ class DqmWeb:
                 return no_update
             if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
                 return no_update
-            evt, charge, _light, _bq, _bl, triggers = self._snapshot()
+            evt, charge, _light, _bq, _bl, triggers, _tmeta = self._snapshot()
             slot = int(slot) if slot is not None else Q_SLOTS[0]
             selected, is_range = _parse_channels(chan_str)
             return make_qfem_waveform_figure(
@@ -740,7 +881,7 @@ class DqmWeb:
                 return no_update
             if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
                 return no_update
-            evt, _charge, light, _bq, _bl, triggers = self._snapshot()
+            evt, _charge, light, _bq, _bl, triggers, _tmeta = self._snapshot()
             return make_lfem_waveform_figure(
                 light, trigger_x=triggers.get(LIGHT_SLOT),
                 title=f"L-FEM slot {LIGHT_SLOT} (evt {evt if evt is not None else '--'})",

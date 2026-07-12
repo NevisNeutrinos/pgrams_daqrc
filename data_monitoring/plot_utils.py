@@ -65,6 +65,26 @@ N_LIGHT_CHANNELS = 36
 SAMPLES_PER_FRAME = 256       # Q-FEM: 2 MHz, 256 samples / 128 us frame
 LIGHT_TICKS_PER_FRAME = 8192  # L-FEM: 64 MHz, 8192 ticks / 128 us frame
 
+# Shared 4-frame readout window (one frame = 128 us). Heatmaps use a common
+# 0..WINDOW_US axis so Q-FEM and L-FEM line up; waveform tabs keep native
+# sample/tick units but Reset Axes restores this full window.
+N_READOUT_FRAMES = 4
+FRAME_US = 128.0
+WINDOW_US = N_READOUT_FRAMES * FRAME_US  # 512 us
+Q_US_PER_SAMPLE = 0.5                     # 2 MHz
+L_US_PER_TICK = 1.0 / 64.0                # 64 MHz
+Q_SAMPLES_FULL = N_READOUT_FRAMES * SAMPLES_PER_FRAME  # 1024 (4-frame heatmap axis)
+# Nominal Q-FEM readout: 3 frames (256 pre + 512 post); Reset Axes on the
+# Q-FEM waveforms tab restores this x-span (64 ch x 768 samples).
+Q_SAMPLES_NOMINAL = 3 * SAMPLES_PER_FRAME  # 768
+L_TICKS_FULL = LIGHT_WINDOW_TICKS         # 32768
+# Q-FEM buffer is trigger-aligned: this many samples before the trigger.
+Q_PRETRIGGER_SAMPLES = 256
+
+# Shared plot-area domain so Q/L heatmaps are the same width despite colorbars.
+HEATMAP_XAXIS_DOMAIN = [0.0, 0.86]
+HEATMAP_COLORBAR = dict(len=1.0, thickness=14, x=0.90, xanchor="left")
+
 COMPACT_MARGIN = dict(l=48, r=12, t=36, b=32)
 HEATMAP_HEIGHT = 290
 LBW_HEIGHT = 92
@@ -169,11 +189,16 @@ def build_light_heatmap(
     light_channels: dict[int, list[dict]],
     nchan: int = N_LIGHT_CHANNELS,
     pad: int = 32,
+    xmin: int | None = None,
+    xmax: int | None = None,
 ) -> tuple[np.ndarray, int, int]:
-    xmin, xmax = light_sample_extent(light_channels)
-    xmin = max(0, xmin - pad)
-    xmax = xmax + pad
-    width = xmax - xmin + 1
+    if xmin is None or xmax is None:
+        x0, x1 = light_sample_extent(light_channels)
+        if xmin is None:
+            xmin = max(0, x0 - pad)
+        if xmax is None:
+            xmax = x1 + pad
+    width = max(1, xmax - xmin + 1)
     img = np.full((nchan, width), np.nan, dtype=np.float32)
 
     for ch, rois in light_channels.items():
@@ -194,10 +219,10 @@ def build_light_heatmap(
             src1 = src0 + (dst1 - dst0)
             img[ch, dst0:dst1] = samples[src0:src1]
 
-    return img, xmin, xmax + pad
+    return img, xmin, xmax
 
 
-def _add_trigger_line(fig: go.Figure, trigger_x: int | None, *, absolute: bool = False):
+def _add_trigger_line(fig: go.Figure, trigger_x: float | None, *, absolute: bool = False):
     if trigger_x is None:
         return
     fig.add_vline(
@@ -223,34 +248,63 @@ def make_charge_heatmap_figure(
     channels: dict[int, np.ndarray],
     title: str = "Q-FEM",
     trigger_x: int | None = None,
+    trig_sample: int | None = None,
 ) -> go.Figure:
+    """Q-FEM heatmap on the shared 4-frame (0..512 us) axis.
+
+    The buffer is trigger-aligned (``Q_PRETRIGGER_SAMPLES`` before the trigger).
+    ``trig_sample`` is the 2 MHz sample# from this FEM's FEMHeader6; together with
+    the fixed pre-trigger count it places the 3-frame readout inside the same
+    [trig_frame-1 .. trig_frame+2] window used for L-FEM.
+    """
     img_sub, nchan, nsamp = build_charge_heatmap(channels)
     if not channels:
         return _empty_figure(title, "(no data)")
 
     zlim = charge_heatmap_zlim(img_sub)
+    # Trigger sits in local frame 1 of the 4-frame window, at 2 MHz sample#.
+    sample = 0 if trig_sample is None else int(trig_sample)
+    trig_us = FRAME_US + sample * Q_US_PER_SAMPLE
+    t0 = trig_us - Q_PRETRIGGER_SAMPLES * Q_US_PER_SAMPLE
+    x_us = [t0 + i * Q_US_PER_SAMPLE for i in range(nsamp)]
+    cbar = {**HEATMAP_COLORBAR, "title": "ADC-med"}
     fig = go.Figure(
         data=go.Heatmap(
             z=img_sub,
-            x=list(range(nsamp)),
+            x=x_us,
             y=list(range(nchan)),
             colorscale="RdBu_r",
             zmid=0,
             zmin=-zlim,
             zmax=zlim,
-            colorbar=dict(title="ADC-med", len=1.0, thickness=14),
+            colorbar=cbar,
         )
     )
-    for x in range(SAMPLES_PER_FRAME, nsamp, SAMPLES_PER_FRAME):
-        fig.add_vline(x=x, line_width=1, line_dash="dash", line_color="black", opacity=0.45)
-    _add_trigger_line(fig, trigger_x)
+    for k in range(1, N_READOUT_FRAMES):
+        fig.add_vline(
+            x=k * FRAME_US, line_width=1, line_dash="dash",
+            line_color="black", opacity=0.45,
+        )
+    # Prefer header-based trig_us; fall back to buffer column if no header sample.
+    if trig_sample is not None:
+        _add_trigger_line(fig, trig_us)
+    elif trigger_x is not None:
+        _add_trigger_line(fig, t0 + trigger_x * Q_US_PER_SAMPLE)
 
     fig.update_layout(
         title=dict(text=f"{title} ({nchan}ch x {nsamp} smp, ped-sub)", font=dict(size=11)),
-        xaxis_title="sample (0.5 \u03bcs each time tick)",
+        xaxis=dict(
+            title="t (4\u00d7128 \u03bcs; 2 MHz, 500 ns bin width)",
+            range=[0, WINDOW_US],
+            autorange=False,
+            domain=HEATMAP_XAXIS_DOMAIN,
+        ),
         yaxis_title="ch",
         margin=COMPACT_MARGIN,
         height=HEATMAP_HEIGHT,
+        # So Reset / odd double-click reliably returns to the 0..512 us window
+        # (even double-click still autoscales to data, like waveform tabs).
+        meta=dict(default_ranges={"xaxis": [0, WINDOW_US]}),
     )
     return fig
 
@@ -268,6 +322,8 @@ def make_light_heatmap_figure(
     if not fired:
         return _empty_figure(title, "(no data)")
 
+    # ROI data stay sparse; the shared 0..512 us axis leaves empty space outside
+    # fired regions so Q/L heatmaps line up.
     img, xmin, xmax = build_light_heatmap(light_channels)
     finite = img[np.isfinite(img)]
     vmin = float(np.percentile(finite, 2)) if finite.size else 2000.0
@@ -277,28 +333,39 @@ def make_light_heatmap_figure(
 
     width = img.shape[1]
     n_rois = sum(len(light_channels[c]) for c in fired)
+    x_us = [(xmin + i) * L_US_PER_TICK for i in range(width)]
+    cbar = {**HEATMAP_COLORBAR, "title": "ADC"}
     fig = go.Figure(
         data=go.Heatmap(
             z=img,
-            x=[xmin + i for i in range(width)],
+            x=x_us,
             y=list(range(N_LIGHT_CHANNELS)),
             colorscale="YlOrRd",
             zmin=vmin,
             zmax=vmax,
-            colorbar=dict(title="ADC", len=1.0, thickness=14),
+            colorbar=cbar,
         )
     )
-    first_line = ((xmin + LIGHT_TICKS_PER_FRAME - 1) // LIGHT_TICKS_PER_FRAME) * LIGHT_TICKS_PER_FRAME
-    for x in range(first_line, xmin + width, LIGHT_TICKS_PER_FRAME):
-        fig.add_vline(x=x, line_width=1, line_dash="dash", line_color="black", opacity=0.45)
-    _add_trigger_line(fig, trigger_x)
+    for k in range(1, N_READOUT_FRAMES):
+        fig.add_vline(
+            x=k * FRAME_US, line_width=1, line_dash="dash",
+            line_color="black", opacity=0.45,
+        )
+    trig_us = None if trigger_x is None else trigger_x * L_US_PER_TICK
+    _add_trigger_line(fig, trig_us)
 
     fig.update_layout(
         title=dict(text=f"{title} ({len(fired)} ch, {n_rois} ROIs)", font=dict(size=11)),
-        xaxis_title="sample (15.6 ns each time tick)",
+        xaxis=dict(
+            title="t (4\u00d7128 \u03bcs; 64 MHz, 15.625 ns bin width)",
+            range=[0, WINDOW_US],
+            autorange=False,
+            domain=HEATMAP_XAXIS_DOMAIN,
+        ),
         yaxis_title="ch",
         margin=COMPACT_MARGIN,
         height=HEATMAP_HEIGHT,
+        meta=dict(default_ranges={"xaxis": [0, WINDOW_US]}),
     )
     return fig
 
@@ -393,8 +460,8 @@ def make_qfem_waveform_figure(
         )
         fig.update_yaxes(title_text=f"ch{ch}", row=r, col=1)
 
-    # Gray frame boundaries (every 256 samples) on every row.
-    boundaries = list(range(SAMPLES_PER_FRAME, nsamp, SAMPLES_PER_FRAME))
+    # Frame boundaries within the nominal 3-frame (768-sample) readout.
+    boundaries = [k * SAMPLES_PER_FRAME for k in range(1, 3)]
     for r in range(1, rows + 1):
         for x in boundaries:
             fig.add_vline(x=x, line_width=1, line_dash="dash", line_color="black", opacity=0.4, row=r, col=1)
@@ -410,13 +477,18 @@ def make_qfem_waveform_figure(
             )
 
     _apply_domains(fig, domains)
-    # X-axis label under the heatmap (the larger first gap keeps it clear of row 2).
+    # Default / Autoscale: data extent (so extra-long channels stay visible).
+    # Reset Axes / double-click: nominal 64 x 768 window via meta.full_x_range.
+    # Keep xtick labels on the top heatmap even when waveform rows are below
+    # (shared_xaxes would otherwise hide them).
+    fig.update_xaxes(showticklabels=True, row=1, col=1)
     fig.update_xaxes(title_text="sample (0.5 \u03bcs each time tick)", row=1, col=1)
     fig.update_layout(
         title=dict(text=title, font=dict(size=12)),
         margin=dict(l=58, r=14, t=WF_MARGIN_T, b=WF_MARGIN_B),
         height=height,
         showlegend=False,
+        meta=dict(full_x_range=[0, Q_SAMPLES_NOMINAL]),
     )
     return fig
 
@@ -439,10 +511,6 @@ def make_lfem_waveform_figure(
     height, domains = _waveform_dims(n_sub)
 
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=False, vertical_spacing=0.0)
-
-    def _frame_boundaries(lo: int, hi: int) -> list[int]:
-        k0 = (lo + 8192 - 1) // 8192
-        return [k * 8192 for k in range(k0, hi // 8192 + 1) if lo <= k * 8192 <= hi]
 
     def _vline(x, y0, y1, r, *, color, width, dash=None, opacity=1.0):
         # Vertical line drawn as a trace (not a layout shape): traces always
@@ -489,13 +557,22 @@ def make_lfem_waveform_figure(
     fig.update_yaxes(title_text="ADC", row=1, col=1)
 
     # Overlay x-range: 64-tick gap each side, clamped to the [0, 32768] window.
-    ov_lo = max(0, int(ov_min) - LIGHT_EDGE_PAD)
-    ov_hi = min(LIGHT_WINDOW_TICKS, int(ov_max) + LIGHT_EDGE_PAD)
-    oy0, oy1 = _yspan(ov_ylo, ov_yhi)
-    fig.update_xaxes(range=[ov_lo, ov_hi], row=1, col=1)
-    fig.update_yaxes(range=[oy0, oy1], row=1, col=1)
+    if ov_min is None:
+        ov_lo, ov_hi = 0, LIGHT_WINDOW_TICKS
+        oy0, oy1 = 0.0, 1.0
+    else:
+        ov_lo = max(0, int(ov_min) - LIGHT_EDGE_PAD)
+        ov_hi = min(LIGHT_WINDOW_TICKS, int(ov_max) + LIGHT_EDGE_PAD)
+        oy0, oy1 = _yspan(ov_ylo, ov_yhi)
+    fig.update_xaxes(range=[ov_lo, ov_hi], autorange=False, row=1, col=1)
+    fig.update_yaxes(range=[oy0, oy1], autorange=False, row=1, col=1)
     row_ranges: list[tuple[int, int]] = [(ov_lo, ov_hi)]
     row_yranges: list[tuple[float, float] | None] = [(oy0, oy1)]
+    # Axis names for Autoscale restore (xaxis / yaxis, xaxis2 / yaxis2, ...).
+    default_ranges: dict[str, list[float]] = {
+        "xaxis": [ov_lo, ov_hi],
+        "yaxis": [oy0, oy1],
+    }
 
     # Window-edge markers (0 / 32768) when they fall inside the overlay range.
     for edge in (0, LIGHT_WINDOW_TICKS):
@@ -536,39 +613,57 @@ def make_lfem_waveform_figure(
         pad = max(8, int(0.04 * (xmax - xmin + 1)))
         lo, hi = xmin - pad, xmax + pad
         ry0, ry1 = _yspan(ylo, yhi)
-        fig.update_xaxes(range=[lo, hi], row=r, col=1)
-        fig.update_yaxes(range=[ry0, ry1], title_text=f"ch{ch}", row=r, col=1)
+        fig.update_xaxes(range=[lo, hi], autorange=False, row=r, col=1)
+        fig.update_yaxes(range=[ry0, ry1], autorange=False, title_text=f"ch{ch}", row=r, col=1)
         row_ranges.append((lo, hi))
         row_yranges.append((ry0, ry1))
+        default_ranges[f"xaxis{r}"] = [lo, hi]
+        default_ranges[f"yaxis{r}"] = [ry0, ry1]
         # ROI start / end markers (light gray, original style).
         for xe in roi_edges:
             _vline(xe, ry0, ry1, r, color="#999", width=0.6, opacity=0.6)
 
-    # Frame boundaries (every 8192 ticks) on every row, where in range.
+    # Frame boundaries: scatter when inside the default view (survives zoom);
+    # layout vlines when outside (ignored by Autoscale, visible after Reset).
     for r in range(1, rows + 1):
         yr = row_yranges[r - 1]
         if yr is None:
             continue
         lo, hi = row_ranges[r - 1]
-        for x in _frame_boundaries(lo, hi):
-            _vline(x, yr[0], yr[1], r, color="black", width=1, dash="dash", opacity=0.5)
+        for x in range(LIGHT_TICKS_PER_FRAME, L_TICKS_FULL, LIGHT_TICKS_PER_FRAME):
+            if lo <= x <= hi:
+                _vline(x, yr[0], yr[1], r, color="black", width=1, dash="dash", opacity=0.5)
+            else:
+                fig.add_vline(
+                    x=x, line_width=1, line_dash="dash", line_color="black",
+                    opacity=0.5, row=r, col=1,
+                )
 
     if trigger_x is not None:
-        _vline(trigger_x, oy0, oy1, 1, color="limegreen", width=1.5, dash="dash")
         fig.add_annotation(
             x=trigger_x, y=1.0, xref="x", yref="y domain", yshift=12, text="trigger",
             showarrow=False, font=dict(size=9, color="green"),
             xanchor="center", yanchor="bottom",
         )
-        for r in range(2, rows + 1):
-            yr = row_yranges[r - 1]
-            lo, hi = row_ranges[r - 1]
-            if yr is not None and lo <= trigger_x <= hi:
+        for r in range(1, rows + 1):
+            yr = row_yranges[r - 1] if r > 1 else (oy0, oy1)
+            lo, hi = row_ranges[r - 1] if r > 1 else (ov_lo, ov_hi)
+            if yr is None:
+                continue
+            # Same pattern as frame boundaries: scatter inside the default view
+            # (survives zoom); layout vline outside (visible after Reset).
+            # Both use the same y span so Reset never makes trigger look taller.
+            if lo <= trigger_x <= hi:
                 _vline(trigger_x, yr[0], yr[1], r, color="limegreen", width=1.5, dash="dash")
+            else:
+                fig.add_vline(
+                    x=trigger_x, line_width=1.5, line_dash="dash",
+                    line_color="limegreen", opacity=0.9, row=r, col=1,
+                )
 
     _apply_domains(fig, domains)
     # X-axis label under the overlay (the larger first gap keeps it clear of row 2).
-    fig.update_xaxes(title_text="sample (15.6 ns each time tick)", row=1, col=1)
+    fig.update_xaxes(title_text="sample (15.625 ns each time tick)", row=1, col=1)
     fig.update_layout(
         title=dict(text=title, font=dict(size=12), x=0.01, xanchor="left"),
         margin=dict(l=58, r=104, t=WF_MARGIN_T, b=WF_MARGIN_B),
@@ -576,6 +671,13 @@ def make_lfem_waveform_figure(
         legend=dict(
             font=dict(size=13), orientation="v", x=1.005, xanchor="left",
             y=1.0, yanchor="top", itemsizing="constant",
+        ),
+        # Default ranges restored by Autoscale / even double-click (JS);
+        # Reset / odd double-click -> x full 0..32768, y stays at default.
+        meta=dict(
+            full_x_range=[0, L_TICKS_FULL],
+            default_ranges=default_ranges,
+            autoscale_to_default=True,
         ),
     )
     return fig
