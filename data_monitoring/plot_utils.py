@@ -244,11 +244,23 @@ def _add_trigger_line(fig: go.Figure, trigger_x: float | None, *, absolute: bool
     )
 
 
+def _fem_header_title_suffix(meta: dict | None) -> str:
+    """Format e#/f#/t#/s# from trigger_meta for heatmap titles."""
+    if not meta:
+        return "e#=?, f#=?, t#=?, s#=?"
+    e = meta.get("event_id", "?")
+    f = meta.get("frame_id", "?")
+    t = meta.get("frame", "?")
+    s = meta.get("sample", "?")
+    return f"e#={e}, f#={f}, t#={t}, s#={s}"
+
+
 def make_charge_heatmap_figure(
     channels: dict[int, np.ndarray],
     title: str = "Q-FEM",
     trigger_x: int | None = None,
     trig_sample: int | None = None,
+    header_meta: dict | None = None,
 ) -> go.Figure:
     """Q-FEM heatmap on the shared 4-frame (0..512 us) axis.
 
@@ -257,10 +269,11 @@ def make_charge_heatmap_figure(
     the fixed pre-trigger count it places the 3-frame readout inside the same
     [trig_frame-1 .. trig_frame+2] window used for L-FEM.
     """
-    img_sub, nchan, nsamp = build_charge_heatmap(channels)
+    img_sub, _nchan_axis, nsamp = build_charge_heatmap(channels)
     if not channels:
         return _empty_figure(title, "(no data)")
 
+    n_data = sum(1 for v in channels.values() if len(v) > 0)
     zlim = charge_heatmap_zlim(img_sub)
     # Trigger sits in local frame 1 of the 4-frame window, at 2 MHz sample#.
     sample = 0 if trig_sample is None else int(trig_sample)
@@ -272,7 +285,7 @@ def make_charge_heatmap_figure(
         data=go.Heatmap(
             z=img_sub,
             x=x_us,
-            y=list(range(nchan)),
+            y=list(range(N_QFEM_CHANNELS)),
             colorscale="RdBu_r",
             zmid=0,
             zmin=-zlim,
@@ -291,8 +304,12 @@ def make_charge_heatmap_figure(
     elif trigger_x is not None:
         _add_trigger_line(fig, t0 + trigger_x * Q_US_PER_SAMPLE)
 
+    hdr = _fem_header_title_suffix(header_meta)
     fig.update_layout(
-        title=dict(text=f"{title} ({nchan}ch x {nsamp} smp, ped-sub)", font=dict(size=11)),
+        title=dict(
+            text=f"{title} ({n_data} ch \u00d7 {nsamp} smp): {hdr}",
+            font=dict(size=11),
+        ),
         xaxis=dict(
             title="t (4\u00d7128 \u03bcs; 2 MHz, 500 ns bin width)",
             range=[0, WINDOW_US],
@@ -313,6 +330,7 @@ def make_light_heatmap_figure(
     light_channels: dict[int, list[dict]],
     title: str = "L-FEM",
     trigger_x: int | None = None,
+    header_meta: dict | None = None,
 ) -> go.Figure:
     fired = [
         ch
@@ -354,8 +372,12 @@ def make_light_heatmap_figure(
     trig_us = None if trigger_x is None else trigger_x * L_US_PER_TICK
     _add_trigger_line(fig, trig_us)
 
+    hdr = _fem_header_title_suffix(header_meta)
     fig.update_layout(
-        title=dict(text=f"{title} ({len(fired)} ch, {n_rois} ROIs)", font=dict(size=11)),
+        title=dict(
+            text=f"{title} ({len(fired)} ch, {n_rois} ROIs): {hdr}",
+            font=dict(size=11),
+        ),
         xaxis=dict(
             title="t (4\u00d7128 \u03bcs; 64 MHz, 15.625 ns bin width)",
             range=[0, WINDOW_US],

@@ -44,8 +44,9 @@ class EventRecord:
     trigger_ticks: dict[int, int] = field(default_factory=dict)
     # Event-level 2 MHz trigger tick (shared across FEMs in one event).
     trigger_abs: int | None = None
-    # Per-slot decoded FEMHeader6 trigger: {slot: {"frame","sample","abs"}}.
-    # Kept so the UI can flag Q/L (or Q/Q) header desync.
+    # Per-slot decoded FEM header fields used by the UI:
+    #   event_id (Header3), frame_id (Header4),
+    #   frame/sample/abs from Header6 (trig_frame, trig_sample, linear tick).
     trigger_meta: dict[int, dict] = field(default_factory=dict)
     # L-FEM ROIs whose frame_num falls outside the 4-frame readout window of the
     # (lag-adjusted) L header vs total ROIs -> flags stale/duplicate light data.
@@ -126,7 +127,7 @@ def iter_16bit(payload32: list[int]) -> Iterable[int]:
 
 
 def parse_trig_from_header6(w: int) -> tuple[int, int, int]:
-    """Return (frame, sample, frame*256+sample) from FEMHeader6."""
+    """Return (trig_frame, sample, frame*256+sample) from FEMHeader6."""
     lo, hi = lo16(w), hi16(w)
     sample_upper = lo & 0xF
     trig_frame = (lo >> 4) & 0xF
@@ -134,6 +135,11 @@ def parse_trig_from_header6(w: int) -> tuple[int, int, int]:
     sample = ((sample_upper << 8) & 0xF00) | sample_lower
     tick = trig_frame * SAMPLES_PER_FRAME + sample
     return trig_frame, sample, tick
+
+
+def _pack12x2(lo12: int, hi12: int) -> int:
+    """Nevis-style 24-bit field from a FEM header word: (lo12 << 12) | hi12."""
+    return ((lo12 & 0xFFF) << 12) | (hi12 & 0xFFF)
 
 
 EVENT_MARKER = 0xFFFFFFFF
@@ -245,6 +251,9 @@ def parse_event_payloads(
     current_slot: int | None = None
     target_set = set(all_slots)
     started = False
+    # Scratch for Header3/4 while scanning a FEM block.
+    event_id = 0
+    frame_id = 0
 
     for w in words:
         if w == EVENT_MARKER:
@@ -260,13 +269,23 @@ def parse_event_payloads(
             hdr_idx = 1 if hdr_idx >= 6 else hdr_idx + 1
             if hdr_idx == 1:
                 current_slot = hi & 0x1F
+                event_id = 0
+                frame_id = 0
                 if current_slot in target_set and current_slot not in out:
                     out[current_slot] = []
+            elif hdr_idx == 3 and current_slot in target_set:
+                # Nevis FEMHeader3: 24-bit event_id.
+                event_id = _pack12x2(lo & 0xFFF, hi & 0xFFF)
+            elif hdr_idx == 4 and current_slot in target_set:
+                # Nevis FEMHeader4: 24-bit event frame_id.
+                frame_id = _pack12x2(lo & 0xFFF, hi & 0xFFF)
             elif hdr_idx == 6 and current_slot in target_set:
                 fr, smp, tick_abs = parse_trig_from_header6(w)
                 trigger_meta[current_slot] = {
-                    "frame": fr,
-                    "sample": smp,
+                    "event_id": event_id,
+                    "frame_id": frame_id,
+                    "frame": fr,       # trigger frame (4-bit field)
+                    "sample": smp,     # trigger sample
                     "abs": tick_abs,
                 }
             continue

@@ -133,7 +133,10 @@ def _header_match_warnings(record: EventRecord) -> list[str]:
     if q_present and LIGHT_SLOT in tm:
         q, l = tm[q_present[0]], tm[LIGHT_SLOT]
         if (q["frame"] % LIGHT_FRAME_MOD) != (l["frame"] % LIGHT_FRAME_MOD) or q["sample"] != l["sample"]:
-            warns.append("Q-FEM and L-FEM header not match")
+            warns.append(
+                f"Q-FEM and L-FEM header not match: "
+                f"({q['frame']}, {q['sample']}) and ({l['frame']}, {l['sample']})"
+            )
     # ROIs whose frame_num falls outside the L header's 4-frame readout window
     # cannot belong to this trigger -> stale/duplicate light data. This fires even
     # when a lag makes the headers match, flagging the event as still corrupt.
@@ -657,6 +660,7 @@ class DqmWeb:
                 title=f"Q-FEM slot {slot}",
                 trigger_x=triggers.get(slot),
                 trig_sample=(tmeta.get(slot) or {}).get("sample"),
+                header_meta=tmeta.get(slot),
             )
             for slot in Q_SLOTS
         ]
@@ -665,6 +669,7 @@ class DqmWeb:
                 light,
                 title=f"L-FEM slot {LIGHT_SLOT}",
                 trigger_x=triggers.get(LIGHT_SLOT),
+                header_meta=tmeta.get(LIGHT_SLOT),
             )
         )
 
@@ -724,7 +729,11 @@ class DqmWeb:
                 State("llag-input", "value"),
             ],
             running=[
-                (Output("status-msg", "children"), "Loading data file...", True),
+                (
+                    Output("status-msg", "children"),
+                    html.Span("Loading data file...", style={"color": "limegreen"}),
+                    True,
+                ),
             ],
         )
         def refresh(_, _load_clicks, _up, _down, pause_val, file_path, evt_idx, q_lag, l_lag):
