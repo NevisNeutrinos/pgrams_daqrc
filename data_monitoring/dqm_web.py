@@ -54,6 +54,7 @@ from data_monitoring.plot_utils import (
     make_lfem_waveform_figure,
     make_light_heatmap_figure,
     make_qfem_waveform_figure,
+    make_qt_figure
 )
 
 
@@ -488,7 +489,7 @@ class DqmWeb:
                 html.Div(
                     id="panel-evt",
                     style=PANEL_HIDE,
-                    children=[self._placeholder_tab("Event display (charge 2D / light 3D reconstruction)")],
+                    children=[dcc.Graph(id="evt-display-graph", style={"width": "96%"})],
                 ),
                 dcc.Store(id="active-tab", data="heat"),
                 dcc.Store(id="event-version", data=0),
@@ -895,6 +896,29 @@ class DqmWeb:
                 light, trigger_x=triggers.get(LIGHT_SLOT),
                 title=f"L-FEM slot {LIGHT_SLOT} (evt {evt if evt is not None else '--'})",
             )
+        
+        @self.app.callback(
+            Output("evt-display-graph", "figure"),
+            [
+                Input("update-interval", "n_intervals"),
+                Input("active-tab", "data"),
+                Input("event-version", "data"),
+            ],
+        )
+        def event_display_graph(_n, tab, _ver):
+            # 1. Do nothing if the user is on a different tab
+            if tab != "evt":
+                return no_update
+            
+            # 2. Do nothing if the app is paused/frozen (avoids overwriting manual event selection)
+            if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
+                return no_update
+            
+            # 3. Safely pull the data snapshot from the backend
+            evt, charge_slots, _light, _bq, _bl, _trigger_ticks, _trigger_meta = self._snapshot()
+            
+            # 4. Pass the charge dictionary to your plotting function
+            return make_qt_figure(charge_slots)
 
     def run(self, blocking: bool = False, open_browser: bool = False):
         url = f"http://{self.host}:{self.port}"
