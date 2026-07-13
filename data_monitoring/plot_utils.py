@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -845,3 +846,150 @@ def _empty_figure(title: str, message: str) -> go.Figure:
         height=HEATMAP_HEIGHT,
     )
     return fig
+
+#Placeholder ADC to shaper channel mapping
+def ADC_to_shaper(ADC):
+    return ADC
+
+#Returns array of shaper channels, from 0 to 180:
+def coord_mapping(bs=3):
+    base_channels = np.array((21,1,23,3,25,5,27,7,29,9,2,11,4,13,6,15,8,17,10,19,12,14,16,18,20,22,24,26,28,30))
+
+    offsets = np.arange(0, 180, 30)[:,None]
+
+    total_channels = (base_channels + offsets).flatten() - 1
+    
+    x_channels_list = np.concatenate((total_channels[:45], total_channels[90:135]))
+    y_channels_list = np.concatenate((total_channels[45:90], total_channels[135:]))
+
+    #Make bank H (E) positions relative to bank I (F). We add IF_pos.max() to start H (E) relative to I (F), and we add the bs (bank spacing) to that value to get the starting value of H (E)
+    #Since IF_pos just defines the spacing b/w adjacent wires, can reuse it for other spacings:
+    IF_pos = np.arange(0,30,2)
+    HE_pos = IF_pos + IF_pos.max() + bs
+    GD_pos = IF_pos + HE_pos.max() + bs
+
+    #Banks A (J) ,B (K), C (L) are just shifted 1 wire-unit to the right (up) of I (F), H (E), G (D).
+    AJ_pos = IF_pos + 1
+    BK_pos = HE_pos + 1
+    CL_pos = GD_pos + 1
+
+    #Concatenate the position arrays, and make sure they are ordered exactly as x_channels_list is ordered:
+    x_map = np.concatenate((AJ_pos,BK_pos,CL_pos,GD_pos,HE_pos,IF_pos))
+
+    #Make mapping for y, as well, ensuring the ordering is correct:
+    y_map = np.concatenate((GD_pos,HE_pos,IF_pos,AJ_pos,BK_pos,CL_pos))
+
+    # Pre-allocate output matrix of shape (N, 2) filled with None (or np.nan), with channel number in column 0:
+    pos = np.full((len(total_channels), 3), -159)
+    pos[:,0] = np.arange(0,len(total_channels))
+
+
+    #Find the permutation that would take our organized arrays to a sorted array:
+    x_sorter = np.argsort(x_channels_list)
+    y_sorter = np.argsort(y_channels_list)
+
+    x_map = x_map[x_sorter]
+    x_mask = np.isin(pos[:,0], x_channels_list)
+
+    y_map = y_map[y_sorter]
+    y_mask = np.isin(pos[:,0], y_channels_list)
+
+    pos[:,1][x_mask] = x_map
+    pos[:,2][y_mask] = y_map
+
+    return pos
+
+def make_qt_figure(charge_slots_dict):
+    """Generates the X Position vs Time event display."""
+
+    if not charge_slots_dict:
+        # Re-using your existing helper function for empty plots
+        from plot_utils import _empty_figure 
+        return _empty_figure("X Position vs Time", "(no data)")
+    
+    charge_slots = pd.DataFrame(charge_slots_dict)
+    ignored_channels = [30,31,62,63]
+    existing_drops = [ch for ch in ignored_channels if ch in charge_slots.index]
+    charge_slots.drop(existing_drops, inplace=True)
+
+    charge_slots_arr = ADC_to_shaper(np.array(charge_slots))
+
+    t_arr = np.vstack(charge_slots_arr[:,0])
+    f_arr = np.vstack(charge_slots_arr[:,1])
+    fif_arr = np.vstack(charge_slots_arr[:,2])
+
+    Q_ADC = np.vstack((t_arr, f_arr, fif_arr))
+
+    t = np.arange(0, Q_ADC.shape[1], 1) - 256
+
+    coords = coord_mapping()
+
+    x_mask = (coords[:,1] != -159)
+    y_mask = (coords[:,2] != -159)
+
+    x = coords[:,1][x_mask]
+    x_sorter = np.argsort(x)
+
+    y = coords[:,2][y_mask]
+    y_sorter = np.argsort(y)
+
+    x = x[x_sorter]
+    y = y[y_sorter]
+
+    Q_ADC = Q_ADC - np.tile(np.median(Q_ADC, axis=1)[:,None],(1,Q_ADC.shape[1]))
+
+    x_ADC = Q_ADC[x_mask][x_sorter]
+    x_ADC_max = x_ADC.max()
+    y_ADC = Q_ADC[y_mask][y_sorter]
+    y_ADC_max = y_ADC.max()
+
+    if x_ADC_max < 5:
+        x_ADC_max = 5
+    
+    if y_ADC_max < 5:
+        y_ADC_max = 5
+
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=True,           # Locks the x-axis panning/zooming together
+        vertical_spacing=0.15,       # Gap between the two plots
+        subplot_titles=("x vs t", "y vs t") # Optional
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=x_ADC,
+            x=t,
+            y=x,
+            zmax=x_ADC_max,
+            zmid=0,
+            zmin=-x_ADC_max,
+            colorscale="RdBu_r",
+            colorbar=dict(title="ADC", len=0.45, y=0.77, thickness=12),
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=y_ADC,
+            x=t,
+            y=y,
+            zmax=y_ADC_max,
+            zmid=0,
+            zmin=-y_ADC_max,
+            colorscale="RdBu_r",
+            colorbar=dict(title="ADC", len=0.45, y=0.21, thickness=12),
+        ),
+        row=2, col=1
+    )
+
+    fig.update_layout(
+        title="X Position vs Time",
+        xaxis_title="2MHz Sample Number",
+        yaxis_title="Position (wire-spacings)",
+        margin=dict(l=48, r=12, t=36, b=32) 
+    )
+
+    return fig
+
