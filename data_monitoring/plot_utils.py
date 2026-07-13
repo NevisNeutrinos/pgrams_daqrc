@@ -985,11 +985,12 @@ def make_qt_figure(charge_slots_dict):
     )
 
     fig.update_layout(
-        title="X Position vs Time",
-        xaxis_title="2MHz Sample Number",
-        yaxis_title="Position (wire-spacings)",
+        title="Position vs Time",
         margin=dict(l=48, r=12, t=36, b=32) 
     )
+    fig.update_xaxes(title_text="2MHz Sample Number", row=2, col=1)
+    fig.update_yaxes(title_text="x Position (wire spacings)", row=1, col=1)
+    fig.update_yaxes(title_text="y Position (wire spacings)", row=2, col=1)
 
     return fig
 
