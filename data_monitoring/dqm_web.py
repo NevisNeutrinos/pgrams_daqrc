@@ -61,7 +61,8 @@ from data_monitoring.plot_utils import (
     make_lfem_waveform_figure,
     make_light_heatmap_figure,
     make_qfem_waveform_figure,
-    make_qt_figure
+    make_qt_figure,
+    make_lt_figure
 )
 
 
