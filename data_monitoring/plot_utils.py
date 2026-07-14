@@ -983,17 +983,5 @@ def make_qt_figure(charge_slots_dict):
 
     return fig
 
-#def make_lt_figure(light_channels):
-
- #   sample_times = [[] for i in range(len(light_channels))]
-
-  #  for ch, roi_list in light_channels.items():
-   #     for roi in roi_list:
-    #        sample_times[ch].append(roi['samples'] + roi['start_sample'])
-    
-    #sample_times = np.array(sample_times)
-    #print(sample_times)
-    #print(sample_times.shape)
-
-    
-    #return None
+def make_lt_figure(light_channels):
+    return None
