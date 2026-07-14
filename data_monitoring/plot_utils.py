@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from data_monitoring.coord_mapping import coord_mapping
 
 WAVE_PALETTE = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -851,54 +852,6 @@ def _empty_figure(title: str, message: str) -> go.Figure:
 def ADC_to_shaper(ADC):
     return ADC
 
-#Returns array of shaper channels, from 0 to 180:
-def coord_mapping(bs=3):
-    base_channels = np.array((21,1,23,3,25,5,27,7,29,9,2,11,4,13,6,15,8,17,10,19,12,14,16,18,20,22,24,26,28,30))
-
-    offsets = np.arange(0, 180, 30)[:,None]
-
-    total_channels = (base_channels + offsets).flatten() - 1
-    
-    x_channels_list = np.concatenate((total_channels[:45], total_channels[90:135]))
-    y_channels_list = np.concatenate((total_channels[45:90], total_channels[135:]))
-
-    #Make bank H (E) positions relative to bank I (F). We add IF_pos.max() to start H (E) relative to I (F), and we add the bs (bank spacing) to that value to get the starting value of H (E)
-    #Since IF_pos just defines the spacing b/w adjacent wires, can reuse it for other spacings:
-    IF_pos = np.arange(0,30,2)
-    HE_pos = IF_pos + IF_pos.max() + bs
-    GD_pos = IF_pos + HE_pos.max() + bs
-
-    #Banks A (J) ,B (K), C (L) are just shifted 1 wire-unit to the right (up) of I (F), H (E), G (D).
-    AJ_pos = IF_pos + 1
-    BK_pos = HE_pos + 1
-    CL_pos = GD_pos + 1
-
-    #Concatenate the position arrays, and make sure they are ordered exactly as x_channels_list is ordered:
-    x_map = np.concatenate((AJ_pos,BK_pos,CL_pos,GD_pos,HE_pos,IF_pos))
-
-    #Make mapping for y, as well, ensuring the ordering is correct:
-    y_map = np.concatenate((GD_pos,HE_pos,IF_pos,AJ_pos,BK_pos,CL_pos))
-
-    # Pre-allocate output matrix of shape (N, 2) filled with None (or np.nan), with channel number in column 0:
-    pos = np.full((len(total_channels), 3), -159)
-    pos[:,0] = np.arange(0,len(total_channels))
-
-
-    #Find the permutation that would take our organized arrays to a sorted array:
-    x_sorter = np.argsort(x_channels_list)
-    y_sorter = np.argsort(y_channels_list)
-
-    x_map = x_map[x_sorter]
-    x_mask = np.isin(pos[:,0], x_channels_list)
-
-    y_map = y_map[y_sorter]
-    y_mask = np.isin(pos[:,0], y_channels_list)
-
-    pos[:,1][x_mask] = x_map
-    pos[:,2][y_mask] = y_map
-
-    return pos
-
 def make_qt_figure(charge_slots_dict):
     """Generates the X Position vs Time event display."""
 
@@ -950,47 +903,75 @@ def make_qt_figure(charge_slots_dict):
         y_ADC_max = 5
 
     fig = make_subplots(
-        rows=2, cols=1, 
-        shared_xaxes=True,           # Locks the x-axis panning/zooming together
-        vertical_spacing=0.15,       # Gap between the two plots
+        rows=1, cols=2, 
+        shared_yaxes=True,           # Locks the x-axis panning/zooming together
+        horizontal_spacing=0.15,       # Gap between the two plots
         subplot_titles=("x vs t", "y vs t") # Optional
     )
 
     fig.add_trace(
         go.Heatmap(
-            z=x_ADC,
-            x=t,
-            y=x,
+            z=np.transpose(x_ADC),
+            x=x,
+            y=t,
             zmax=x_ADC_max,
             zmid=0,
             zmin=-x_ADC_max,
-            colorscale="RdBu_r",
-            colorbar=dict(title="ADC", len=0.45, y=0.77, thickness=12),
+            colorscale=[
+                        [0.0, '#35DFE5'],
+                        [0.35, '#4261FF'],
+                        [0.5, '#000000'],
+                        [0.65, '#FF0000'],
+                        [0.85, '#FFAE00'],
+                        [1.0, '#FFFFFF']
+                        ],
+            colorbar=dict(title="ADC", len=0.55, thickness=12, x=0.45),
         ),
         row=1, col=1
     )
 
     fig.add_trace(
         go.Heatmap(
-            z=y_ADC,
-            x=t,
-            y=y,
+            z=np.transpose(y_ADC),
+            x=y,
+            y=t,
             zmax=y_ADC_max,
             zmid=0,
             zmin=-y_ADC_max,
-            colorscale="RdBu_r",
-            colorbar=dict(title="ADC", len=0.45, y=0.21, thickness=12),
+            colorscale=[
+                        [0.0, '#35DFE5'],
+                        [0.35, '#4261FF'],
+                        [0.5, '#000000'],
+                        [0.65, '#FF0000'],
+                        [0.85, '#FFAE00'],
+                        [1.0, '#FFFFFF']
+                        ],
+            colorbar=dict(title="ADC", len=0.55, thickness=12, x = 1.0),
         ),
-        row=2, col=1
+        row=1, col=2
     )
 
     fig.update_layout(
         title="Position vs Time",
         margin=dict(l=48, r=12, t=36, b=32) 
     )
-    fig.update_xaxes(title_text="2MHz Sample Number", row=2, col=1)
-    fig.update_yaxes(title_text="x Position (wire spacings)", row=1, col=1)
-    fig.update_yaxes(title_text="y Position (wire spacings)", row=2, col=1)
+    fig.update_yaxes(title_text="2MHz Sample Number", row=1, col=1)
+    fig.update_xaxes(title_text="x Position (wire spacings)", row=1, col=1)
+    fig.update_xaxes(title_text="y Position (wire spacings)", row=1, col=2)
 
     return fig
 
+#def make_lt_figure(light_channels):
+
+ #   sample_times = [[] for i in range(len(light_channels))]
+
+  #  for ch, roi_list in light_channels.items():
+   #     for roi in roi_list:
+    #        sample_times[ch].append(roi['samples'] + roi['start_sample'])
+    
+    #sample_times = np.array(sample_times)
+    #print(sample_times)
+    #print(sample_times.shape)
+
+    
+    #return None
