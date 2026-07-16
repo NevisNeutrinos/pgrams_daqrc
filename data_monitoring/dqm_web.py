@@ -62,6 +62,8 @@ from data_monitoring.plot_utils import (
     make_light_heatmap_figure,
     make_qfem_waveform_figure,
     make_qt_figure,
+    #make_qt_figure_horizontal,
+    make_qt_figure_testing,
     make_lt_figure
 )
 
@@ -1249,7 +1251,7 @@ class DqmWeb:
                 Input("event-version", "data"),
             ],
         )
-        def event_display_graph(_n, tab, _ver):
+        def event_display_q_graphs(_n, tab, _ver):
             # 1. Do nothing if the user is on a different tab
             if tab != "evt":
                 return no_update
@@ -1262,7 +1264,35 @@ class DqmWeb:
             evt, charge_slots, _light, _bq, _bl, _trigger_ticks, _trigger_meta = self._snapshot()
             
             # 4. Pass the charge dictionary to your plotting function
-            return make_qt_figure(charge_slots)
+            # return make_qt_figure_horizontal(charge_slots)
+            return make_qt_figure_testing(charge_slots, restrict_window=True)
+            #return make_qt_figure(charge_slots, restrict_window=True)
+        
+        # @self.app.callback(
+        #     Output("evt-display-graph", "figure"),
+        #     [
+        #         Input("update-interval", "n_intervals"),
+        #         Input("active-tab", "data"),
+        #         Input("event-version", "data"),
+        #     ],
+        # )
+
+        # def event_display_l_graphs(_n, tab, _ver):
+        #     # 1. Do nothing if the user is on a different tab
+        #     # if tab != "evt":
+        #     #     return no_update
+            
+        #     # 2. Do nothing if the app is paused/frozen (avoids overwriting manual event selection)
+        #     if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
+        #         return no_update
+            
+        #     # 3. Safely pull the data snapshot from the backend
+        #     evt, charge_slots, light, bq, bl, trigger_ticks, trigger_meta = self._snapshot()
+
+        #     figure = make_lt_figure(light)
+            
+        #     # 4. Pass the charge dictionary to your plotting function
+        #     return figure
 
     def run(self, blocking: bool = False, open_browser: bool = False):
         url = f"http://{self.host}:{self.port}"
