@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 from plotly.subplots import make_subplots
 from data_monitoring.coord_mapping import coord_mapping
 
@@ -848,12 +849,9 @@ def _empty_figure(title: str, message: str) -> go.Figure:
     )
     return fig
 
-#Placeholder ADC to shaper channel mapping
-def ADC_to_shaper(ADC):
-    return ADC
-
-def make_qt_figure(charge_slots_dict):
+def make_qt_figure(charge_slots_dict, window_size=200, restrict_window=True):
     """Generates the X Position vs Time event display."""
+    coords = coord_mapping()
 
     if not charge_slots_dict:
         # Re-using your existing helper function for empty plots
@@ -861,62 +859,85 @@ def make_qt_figure(charge_slots_dict):
         return _empty_figure("X Position vs Time", "(no data)")
     
     charge_slots = pd.DataFrame(charge_slots_dict)
-    ignored_channels = [30,31,62,63]
-    existing_drops = [ch for ch in ignored_channels if ch in charge_slots.index]
-    charge_slots.drop(existing_drops, inplace=True)
 
-    charge_slots_arr = ADC_to_shaper(np.array(charge_slots))
+    slot_thirteen = np.vstack(np.array(charge_slots[13]))
+    slot_fourteen = np.vstack(np.array(charge_slots[14]))
+    slot_fifteen = np.vstack(np.array(charge_slots[15]))
 
-    t_arr = np.vstack(charge_slots_arr[:,0])
-    f_arr = np.vstack(charge_slots_arr[:,1])
-    fif_arr = np.vstack(charge_slots_arr[:,2])
+    all_channels = np.vstack((slot_thirteen,slot_fourteen,slot_fifteen))
 
-    Q_ADC = np.vstack((t_arr, f_arr, fif_arr))
+    all_channels = all_channels - np.median(all_channels, axis=1)[:,None]
 
-    t = np.arange(0, Q_ADC.shape[1], 1) - 256
+    #Get max ADC index:
+    flat_max_ADC_idx = np.argmax(all_channels)
+    max_row_idx, max_col_idx = np.unravel_index(flat_max_ADC_idx, all_channels.shape)
 
-    coords = coord_mapping()
+    #RESTRICT TIME WINDOW:
+    if restrict_window:
+        #Snip ADC timestamps to only be 200 samples + / - the maximum ADC value's timestamp:
+        all_channels = all_channels[:,np.max((max_col_idx-(window_size//4),0)): max_col_idx + window_size]
+
+    #all_channels is ordered according to channels, 0:191, as is coords.
+    #We will simply snip the missing channels from both arrays, preserving the ordering:
+    missing_channel_mask = ~((coords[:,1] == -159) & (coords[:,2] == -159))
+
+    all_channels = all_channels[missing_channel_mask,:]
+    coords = coords[missing_channel_mask,:]
 
     x_mask = (coords[:,1] != -159)
-    y_mask = (coords[:,2] != -159)
-
-    x = coords[:,1][x_mask]
-    x_sorter = np.argsort(x)
-
-    y = coords[:,2][y_mask]
-    y_sorter = np.argsort(y)
-
-    x = x[x_sorter]
-    y = y[y_sorter]
-
-    Q_ADC = Q_ADC - np.tile(np.median(Q_ADC, axis=1)[:,None],(1,Q_ADC.shape[1]))
-
-    x_ADC = Q_ADC[x_mask][x_sorter]
+    x_coords = coords[:,1][x_mask]
+    x_ADC = all_channels[x_mask,:]
     x_ADC_max = x_ADC.max()
-    y_ADC = Q_ADC[y_mask][y_sorter]
+
+    y_mask = (coords[:,2] != -159)
+    y_coords = coords[:,2][y_mask]
+    y_ADC = all_channels[y_mask,:]
     y_ADC_max = y_ADC.max()
 
-    if x_ADC_max < 5:
-        x_ADC_max = 5
+    #Finally, sort the x and y coords in ascending order:
+    x_sorter = np.argsort(x_coords)
+    y_sorter = np.argsort(y_coords)
     
-    if y_ADC_max < 5:
-        y_ADC_max = 5
+    x_coords = x_coords[x_sorter]
+    x_ADC = x_ADC[x_sorter,:]
+    
+    y_coords = y_coords[y_sorter]
+    y_ADC = y_ADC[y_sorter,:]
+
+    #Let's add in a list of 0 ADC values at the missing coordinates:
+
+    x_diffs = np.diff(x_coords)
+    missing_idx = np.where(x_diffs != 1)
+    for idx in missing_idx:
+        x_coords = np.insert(x_coords, idx+1, x_coords[idx]+1)
+        x_ADC = np.insert(x_ADC, idx+1, np.full(x_ADC.shape[1], 0), axis=0)
+
+    y_diffs = np.diff(y_coords)
+    missing_idx = np.where(y_diffs != 1)
+    for idx in missing_idx:
+        y_coords = np.insert(y_coords, idx+1, y_coords[idx]+1)
+        y_ADC = np.insert(y_ADC, idx+1, np.full(y_ADC.shape[1], 0), axis=0)
+
+    ADC_max = np.max((x_ADC_max,y_ADC_max))
+
+    t = np.arange(0,all_channels.shape[1],1)
 
     fig = make_subplots(
         rows=1, cols=2, 
-        shared_yaxes=True,           # Locks the x-axis panning/zooming together
-        horizontal_spacing=0.15,       # Gap between the two plots
+        shared_yaxes=True,
+        #shared_xaxes=True,           # Locks the x-axis panning/zooming together
+        horizontal_spacing=0.1,       # Gap between the two plots
         subplot_titles=("x vs t", "y vs t") # Optional
     )
 
     fig.add_trace(
         go.Heatmap(
-            z=np.transpose(x_ADC),
-            x=x,
+            z=x_ADC.transpose(),
+            x=x_coords,
             y=t,
-            zmax=x_ADC_max,
+            zmax=ADC_max,
             zmid=0,
-            zmin=-x_ADC_max,
+            zmin=-ADC_max,
             colorscale=[
                         [0.0, '#35DFE5'],
                         [0.35, '#4261FF'],
@@ -925,19 +946,20 @@ def make_qt_figure(charge_slots_dict):
                         [0.85, '#FFAE00'],
                         [1.0, '#FFFFFF']
                         ],
-            colorbar=dict(title="ADC", len=0.55, thickness=12, x=0.45),
+            hovertemplate="x: %{x}<br>t: %{y}<br>ADC: %{z}<extra></extra>",
+            showscale=False
         ),
         row=1, col=1
     )
 
     fig.add_trace(
         go.Heatmap(
-            z=np.transpose(y_ADC),
-            x=y,
+            z=y_ADC.transpose(),
+            x=y_coords,
             y=t,
-            zmax=y_ADC_max,
+            zmax=ADC_max,
             zmid=0,
-            zmin=-y_ADC_max,
+            zmin=-ADC_max,
             colorscale=[
                         [0.0, '#35DFE5'],
                         [0.35, '#4261FF'],
@@ -946,20 +968,280 @@ def make_qt_figure(charge_slots_dict):
                         [0.85, '#FFAE00'],
                         [1.0, '#FFFFFF']
                         ],
-            colorbar=dict(title="ADC", len=0.55, thickness=12, x = 1.0),
+            colorbar=dict(title="ADC", len=0.8, thickness=12, y=-0.35, orientation='h', title_side='top'),
+            hovertemplate="y: %{x}<br>t: %{y}<br>ADC: %{z}<extra></extra>"
         ),
         row=1, col=2
     )
 
     fig.update_layout(
-        title="Position vs Time",
-        margin=dict(l=48, r=12, t=36, b=32) 
+        title="Position (wire spacings) vs Time (2MHz Sample Number)",
+        margin=dict(l=48, r=12, t=80, b=32) 
     )
     fig.update_yaxes(title_text="2MHz Sample Number", row=1, col=1)
-    fig.update_xaxes(title_text="x Position (wire spacings)", row=1, col=1)
-    fig.update_xaxes(title_text="y Position (wire spacings)", row=1, col=2)
+    fig.update_xaxes(title_text="x", row=1, col=1)
+    fig.update_xaxes(title_text="y", row=1, col=2)
 
     return fig
 
-def make_lt_figure(light_channels):
-    return None
+def make_qt_figure_horizontal(charge_slots_dict, window_size=200):
+    """Generates the X Position vs Time event display."""
+    coords = coord_mapping()
+
+    if not charge_slots_dict:
+        # Re-using your existing helper function for empty plots
+        from plot_utils import _empty_figure 
+        return _empty_figure("X Position vs Time", "(no data)")
+    
+    charge_slots = pd.DataFrame(charge_slots_dict)
+
+    slot_thirteen = np.vstack(np.array(charge_slots[13]))
+    slot_fourteen = np.vstack(np.array(charge_slots[14]))
+    slot_fifteen = np.vstack(np.array(charge_slots[15]))
+
+    all_channels = np.vstack((slot_thirteen,slot_fourteen,slot_fifteen))
+
+    all_channels = all_channels - np.median(all_channels, axis=1)[:,None]
+
+    #Get max ADC index:
+    flat_max_ADC_idx = np.argmax(all_channels)
+    max_row_idx, max_col_idx = np.unravel_index(flat_max_ADC_idx, all_channels.shape)
+
+    #RESTRICT TIME WINDOW:
+    #Snip ADC timestamps to only be 200 samples + / - the maximum ADC value's timestamp:
+    all_channels = all_channels[:,np.max((max_col_idx-(window_size//4),0)): max_col_idx + window_size]
+
+    #all_channels is ordered according to channels, 0:191, as is coords.
+    #We will simply snip the missing channels from both arrays, preserving the ordering:
+    missing_channel_mask = ~((coords[:,1] == -159) & (coords[:,2] == -159))
+
+    all_channels = all_channels[missing_channel_mask,:]
+    coords = coords[missing_channel_mask,:]
+
+    x_mask = (coords[:,1] != -159)
+    x_coords = coords[:,1][x_mask]
+    x_ADC = all_channels[x_mask,:]
+    x_ADC_max = x_ADC.max()
+
+    y_mask = (coords[:,2] != -159)
+    y_coords = coords[:,2][y_mask]
+    y_ADC = all_channels[y_mask,:]
+    y_ADC_max = y_ADC.max()
+
+    #Finally, sort the x and y coords in ascending order:
+    x_sorter = np.argsort(x_coords)
+    y_sorter = np.argsort(y_coords)
+    
+    x_coords = x_coords[x_sorter]
+    x_ADC = x_ADC[x_sorter,:]
+    
+    y_coords = y_coords[y_sorter]
+    y_ADC = y_ADC[y_sorter,:]
+
+    ADC_max = np.max((x_ADC_max, y_ADC_max))
+
+    t = np.arange(0,all_channels.shape[1],1)
+
+    fig = make_subplots(
+        rows=2, cols=1, 
+        #shared_yaxes=True,
+        #shared_xaxes=True,           # Locks the x-axis panning/zooming together
+        vertical_spacing=0.15,       # Gap between the two plots
+        subplot_titles=("x vs t", "y vs t") # Optional
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=x_ADC,
+            x=t,
+            y=x_coords,
+            zmax=ADC_max,
+            zmid=0,
+            zmin=-ADC_max,
+            colorscale=[
+                        [0.0, '#35DFE5'],
+                        [0.35, '#4261FF'],
+                        [0.5, '#000000'],
+                        [0.65, '#FF0000'],
+                        [0.85, '#FFAE00'],
+                        [1.0, '#FFFFFF']
+                        ],
+            colorbar=dict(title="ADC", len=0.8, thickness=12, y=0.8),
+            hovertemplate="t: %{x}<br>x: %{y}<br>ADC: %{z}<extra></extra>"
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=y_ADC,
+            x=t,
+            y=y_coords,
+            zmax=ADC_max,
+            zmid=0,
+            zmin=-ADC_max,
+            colorscale=[
+                        [0.0, '#35DFE5'],
+                        [0.35, '#4261FF'],
+                        [0.5, '#000000'],
+                        [0.65, '#FF0000'],
+                        [0.85, '#FFAE00'],
+                        [1.0, '#FFFFFF']
+                        ],
+            colorbar=dict(title="ADC", len=0.8, thickness=12, y=0.15),
+            hovertemplate="t: %{x}<br>y: %{y}<br>ADC: %{z}<extra></extra>"
+        ),
+        row=2, col=1
+    )
+
+    fig.update_layout(
+        title="Position (wire spacings) vs Time (2MHz Sample Number)",
+        margin=dict(l=48, r=12, t=80, b=32) 
+    )
+    fig.update_yaxes(title_text="2MHz Sample Number", row=1, col=1)
+    fig.update_xaxes(title_text="x", row=1, col=1)
+    fig.update_xaxes(title_text="y", row=1, col=2)
+
+    return fig
+
+def L_channel_mapping(input_channels: np.ndarray) -> np.ndarray:
+    #channels = np.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35])
+
+    #Channel lookup table. Col. 0 is channel #, col. 1 is x coord, col. 2 is y coord:
+    channel_mapping = np.array([[0,0,7],
+                                [1,0,6],
+                                [2,1,7],
+                                [3,1,6],
+                                [4,3,7],
+                                [5,3,6],
+                                [6,4,7],
+                                [7,6,7],
+                                [8,6,6],
+                                [9,7,7],
+                                [10,7,6],
+                                [11,6,4],
+                                [12,6,3],
+                                [13,7,4],
+                                [14,3,4],
+                                [15,3,3],
+                                [16,4,4],
+                                [17,4,3],
+                                [18,0,4],
+                                [19,0,3],
+                                [20,1,4],
+                                [21,0,1],
+                                [22,0,0],
+                                [23,1,1],
+                                [24,1,0],
+                                [25,3,1],
+                                [26,3,0],
+                                [27,4,1],
+                                [28,6,1],
+                                [29,6,0],
+                                [30,7,1],
+                                [31,7,0],
+                                [32,4,6],
+                                [33,7,3],
+                                [34,1,3],
+                                [35,4,0]])
+
+    mask = np.isin(channel_mapping[:,0], input_channels)
+    coords = channel_mapping[mask,:]
+    return coords
+
+
+def make_lt_figure(light, window_size = 50):
+
+    #Taken from Yinrui's code:
+    fired = [
+        ch
+        for ch, rois in light.items()
+        if any(len(r["samples"]) > 0 for r in rois)
+    ]
+    if not fired:
+        return _empty_figure(title, "(no data)")
+
+    #channels = np.array(list(light.keys()))[:,None]
+    #positions = L_channel_mapping(channels)
+    positions = L_channel_mapping(np.array(list(light.keys()))[:,None])
+
+    ADC_time = []
+
+    for ch, rois in light.items():
+        
+        for roi in rois:
+            ADC_time.append([ch, roi['start_sample']] + [ADC for ADC in roi['samples']])
+    
+    ADC_time = np.array(ADC_time).astype('f8')
+
+    start_times = ADC_time[:,1][:,None]
+
+    #ADC_time[:,1] = ADC_time[:,1] - time_center
+
+    #Yields an array of times, each row corresponds to the corresponding channel_roi-row in ADC_time. This gives us a correspondance b/w time ticks and charge in ADC_time:
+    times = np.tile(np.arange(0, ADC_time[:,2:].shape[1]), (ADC_time.shape[0],1)) + start_times
+
+    bin_edges = np.linspace(times.min(), times.max(), 100)
+
+    #Create an ADC histogram in each ROW. Each row is a ROI / channel. Direct row-correspondance with ADC_time:
+    histogram = []
+    for row in range(times.shape[0]):
+        histogram.append(np.histogram(times[row], bins = bin_edges, weights = ADC_time[row,2:])[0])
+    
+    histogram = np.array(histogram)
+
+    times = bin_edges[:-1]
+
+    #Make the positions array have the correct number of rows:
+    pos_arr = []
+
+    for channel in ADC_time[:,0]:
+        mask = (positions[:,0] == channel)
+        pos_arr.append(positions[mask][0][1:])
+        
+
+    pos_arr = np.array(pos_arr)
+
+    fig = go.Figure()
+
+    min_ADC = histogram.min()
+    max_ADC = histogram.max()
+
+    #Placeholder value pre-slider:
+    t = 5
+
+    fig.add_trace(go.Scatter(
+        x=pos_arr[:, 0],
+        y=pos_arr[:, 1],
+        mode='markers',
+        marker=dict(
+            size=30,
+            color=histogram[:,t],
+            colorscale='Viridis', # You can change this to 'Plasma', 'Inferno', etc.
+            showscale=True,
+            cmin=min_ADC,
+            cmax=max_ADC,
+            colorbar=dict(title="Charge")
+        ),
+        text=[f"Channel: {int(ch)}" for ch in positions[:, 0]],
+        hovertemplate="X: %{x}<br>Y: %{y}<br>Charge: %{marker.color:.2f}<br>%{text}<extra></extra>"
+    ))
+
+    fig.update_layout(
+    xaxis=dict(range=[-1, 8]),
+    yaxis=dict(range=[-1, 8]),
+    title=f"PMT Position Charge at Sample {times[t]}"
+    )
+
+    # fig = go.Figure()
+
+    # fig.add_trace(
+    #         go.Scatter(
+    #             x=np.arange(raw.size), y=raw, mode="lines",
+    #             line=dict(width=1, color=color), showlegend=False,
+    #         ),
+    #         row=r, col=1,
+    #     )
+
+
+    return fig
