@@ -203,7 +203,8 @@ class ConnectionInterface:
         self.monitor.update_light_channel(
             data["channel_number"],
             data["light_samples"],
-            start_tick=data.get("start_tick", 0),
+            frame_num=data.get("frame_num"),
+            start_sample=data.get("start_sample"),
             evt_number=data.get("evt_number"),
         )
 
@@ -346,7 +347,8 @@ class ConnectionInterface:
             rois = [
                 {
                     "channel": roi["channel"],
-                    "start_tick": roi["start_tick"],
+                    "frame_num": roi.get("frame_num"),
+                    "start_sample": roi.get("start_sample"),
                     "samples": roi["light_samples"],
                 }
                 for roi in assembly["light_rois"]
@@ -415,7 +417,8 @@ class ConnectionInterface:
                 asm["light_rois"].append(
                     {
                         "channel": deserialized_data["channel_number"],
-                        "start_tick": deserialized_data.get("start_tick", 0),
+                        "frame_num": deserialized_data.get("frame_num"),
+                        "start_sample": deserialized_data.get("start_sample"),
                         "light_samples": deserialized_data["light_samples"],
                     }
                 )

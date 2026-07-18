@@ -262,6 +262,7 @@ def make_charge_heatmap_figure(
     trigger_x: int | None = None,
     trig_sample: int | None = None,
     header_meta: dict | None = None,
+    charge_window_start: int = 0,
 ) -> go.Figure:
     """Q-FEM heatmap on the shared 4-frame (0..512 us) axis.
 
@@ -269,6 +270,9 @@ def make_charge_heatmap_figure(
     ``trig_sample`` is the 2 MHz sample# from this FEM's FEMHeader6; together with
     the fixed pre-trigger count it places the 3-frame readout inside the same
     [trig_frame-1 .. trig_frame+2] window used for L-FEM.
+
+    ``charge_window_start`` is the readout index of ``channels`` sample 0 when the
+    array is a slice of the full trigger-aligned buffer (flight telemetry uses 248).
     """
     img_sub, _nchan_axis, nsamp = build_charge_heatmap(channels)
     if not channels:
@@ -280,7 +284,8 @@ def make_charge_heatmap_figure(
     sample = 0 if trig_sample is None else int(trig_sample)
     trig_us = FRAME_US + sample * Q_US_PER_SAMPLE
     t0 = trig_us - Q_PRETRIGGER_SAMPLES * Q_US_PER_SAMPLE
-    x_us = [t0 + i * Q_US_PER_SAMPLE for i in range(nsamp)]
+    start = int(charge_window_start)
+    x_us = [t0 + (start + i) * Q_US_PER_SAMPLE for i in range(nsamp)]
     cbar = {**HEATMAP_COLORBAR, "title": "ADC-med"}
     fig = go.Figure(
         data=go.Heatmap(
@@ -303,7 +308,7 @@ def make_charge_heatmap_figure(
     if trig_sample is not None:
         _add_trigger_line(fig, trig_us)
     elif trigger_x is not None:
-        _add_trigger_line(fig, t0 + trigger_x * Q_US_PER_SAMPLE)
+        _add_trigger_line(fig, t0 + (start + trigger_x) * Q_US_PER_SAMPLE)
 
     hdr = _fem_header_title_suffix(header_meta)
     fig.update_layout(

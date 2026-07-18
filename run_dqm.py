@@ -49,7 +49,9 @@ def _demo_feeder(dqm: DqmWeb, interval: float = 3.0):
             start = 400 + ch * 420
             t = np.arange(256, dtype=np.float32)
             wave = 160.0 * np.sin(2 * math.pi * t / 48.0) + rng.normal(0, 5, 256)
-            dqm.update_light_channel(ch, 2050 + wave, start_tick=start, evt_number=evt)
+            dqm.update_light_channel(
+                ch, 2050 + wave, frame_num=ch % 8, start_sample=start % 8192, evt_number=evt
+            )
 
         time.sleep(interval)
 

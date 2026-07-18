@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import webbrowser
@@ -13,6 +14,12 @@ from dash import dcc, html, no_update
 from dash.dependencies import Input, Output, State
 
 from data_monitoring.event_source import LIGHT_SLOT_DEFAULT, Q_SLOTS_DEFAULT, EventRecord, load_event
+from data_monitoring.flight_telemetry_source import (
+    FULL_EVENT_CHARGE_START,
+    load_full_event_from_path,
+    load_lbw_from_path,
+    resolve_default_flight_paths,
+)
 
 DEFAULT_HEX_FILE = "data_files/pGRAMS_bin_441_0_evt100.txt"
 
@@ -183,6 +190,15 @@ class DqmWeb:
         self.trigger_ticks: dict[int, int] = {}
         self.trigger_meta: dict[int, dict] = {}
         self.freeze_live = False
+        # Flight live tab: file-backed snapshot (separate from MQTT live buffer).
+        self.flight_evt_number = None
+        self.flight_charge_slots: dict[int, dict[int, np.ndarray]] = {s: {} for s in Q_SLOTS}
+        self.flight_light_channels: dict[int, list[dict]] = {}
+        self.flight_trigger_ticks: dict[int, int] = {}
+        self.flight_trigger_meta: dict[int, dict] = {}
+        self.flight_lbw_charge = None
+        self.flight_lbw_light = None
+        self._flight_mtimes: dict[str, float] = {}
         # Bumped after each explicit load/step so figure callbacks rebuild from the
         # freshly loaded snapshot (serializes load -> build, avoids races).
         self._load_seq = 0
@@ -321,8 +337,9 @@ class DqmWeb:
         self.app.layout = self._build_layout()
         self._register_callbacks()
 
-    def _fem_row(self, slot: int, is_light: bool) -> html.Div:
-        heat_id = "lfem-heatmap" if is_light else f"qfem-slot-{slot}"
+    def _fem_row(self, slot: int, is_light: bool, *, id_prefix: str = "") -> html.Div:
+        heat_id = f"{id_prefix}lfem-heatmap" if is_light else f"{id_prefix}qfem-slot-{slot}"
+        lbw_id = f"{id_prefix}lbw-{slot}"
         return html.Div(
             style={
                 "display": "grid",
@@ -338,7 +355,7 @@ class DqmWeb:
                     style={"height": f"{HEATMAP_HEIGHT}px"},
                 ),
                 dcc.Graph(
-                    id=f"lbw-{slot}",
+                    id=lbw_id,
                     config={"displayModeBar": False},
                     style={"height": f"{HEATMAP_HEIGHT}px"},
                 ),
@@ -429,51 +446,116 @@ class DqmWeb:
                             options=[{"label": " Pause", "value": "pause"}],
                             value=[],
                         ),
-                        html.Label("File:"),
-                        dcc.Input(
-                            id="file-path", type="text", placeholder="hexdump .txt or .dat path",
-                            value=DEFAULT_HEX_FILE, style={"width": "260px"},
-                        ),
-                        html.Label("Evt#:"),
                         html.Div(
-                            style={"position": "relative", "width": "72px",
-                                   "display": "inline-block"},
+                            id="offline-controls",
+                            style={"display": "flex", "gap": "10px", "alignItems": "center", "flexWrap": "wrap"},
                             children=[
+                                html.Label("File:"),
                                 dcc.Input(
-                                    id="evt-input", type="number", value=0, min=0, step=1,
-                                    style={"width": "100%", "paddingRight": "18px",
-                                           "boxSizing": "border-box",
-                                           "MozAppearance": "textfield"},
+                                    id="file-path", type="text", placeholder="hexdump .txt or .dat path",
+                                    value=DEFAULT_HEX_FILE, style={"width": "260px"},
                                 ),
+                                html.Label("Evt#:"),
                                 html.Div(
-                                    style={"position": "absolute", "right": "1px",
-                                           "top": "1px", "bottom": "1px",
-                                           "display": "flex", "flexDirection": "column",
-                                           "justifyContent": "center"},
+                                    style={"position": "relative", "width": "72px",
+                                           "display": "inline-block"},
                                     children=[
-                                        html.Button("\u25b2", id="evt-up", n_clicks=0, style=STEP_BTN),
-                                        html.Button("\u25bc", id="evt-down", n_clicks=0, style=STEP_BTN),
+                                        dcc.Input(
+                                            id="evt-input", type="number", value=0, min=0, step=1,
+                                            style={"width": "100%", "paddingRight": "18px",
+                                                   "boxSizing": "border-box",
+                                                   "MozAppearance": "textfield"},
+                                        ),
+                                        html.Div(
+                                            style={"position": "absolute", "right": "1px",
+                                                   "top": "1px", "bottom": "1px",
+                                                   "display": "flex", "flexDirection": "column",
+                                                   "justifyContent": "center"},
+                                            children=[
+                                                html.Button("\u25b2", id="evt-up", n_clicks=0, style=STEP_BTN),
+                                                html.Button("\u25bc", id="evt-down", n_clicks=0, style=STEP_BTN),
+                                            ],
+                                        ),
                                     ],
                                 ),
+                                html.Label("Q lag:", title="header_lag,adc_lag (e.g. '1' shifts both, '1,0' shifts header only). header_lag picks the FEMHeader6 event; adc_lag picks the charge-ADC event."),
+                                dcc.Input(id="qlag-input", type="text", value="",
+                                          placeholder="0,0", style={"width": "56px"}),
+                                html.Label("L lag:", title="header_lag,adc_lag (e.g. '1' shifts both, '1,0' shifts header only). header_lag picks the L-FEM FEMHeader6 (trigger/ROI remap) event; adc_lag picks the light-ROI event."),
+                                dcc.Input(id="llag-input", type="text", value="",
+                                          placeholder="0,0", style={"width": "56px"}),
+                                html.Button("Load", id="load-btn", n_clicks=0),
                             ],
                         ),
-                        html.Label("Q lag:", title="header_lag,adc_lag (e.g. '1' shifts both, '1,0' shifts header only). header_lag picks the FEMHeader6 event; adc_lag picks the charge-ADC event."),
-                        dcc.Input(id="qlag-input", type="text", value="",
-                                  placeholder="0,0", style={"width": "56px"}),
-                        html.Label("L lag:", title="header_lag,adc_lag (e.g. '1' shifts both, '1,0' shifts header only). header_lag picks the L-FEM FEMHeader6 (trigger/ROI remap) event; adc_lag picks the light-ROI event."),
-                        dcc.Input(id="llag-input", type="text", value="",
-                                  placeholder="0,0", style={"width": "56px"}),
-                        html.Button("Load", id="load-btn", n_clicks=0),
+                        html.Div(
+                            id="flight-controls",
+                            style={
+                                **PANEL_HIDE,
+                                "display": "flex",
+                                "gap": "14px",
+                                "alignItems": "center",
+                                "flexWrap": "wrap",
+                                "marginTop": "6px",
+                                "marginLeft": "8px",
+                                "marginRight": "8px",
+                            },
+                            children=[
+                                html.Label("Full event file:", style={"fontSize": "13px"}),
+                                dcc.Input(
+                                    id="flight-full-path",
+                                    type="text",
+                                    placeholder="data_files/full_event_run_file.txt",
+                                    style={"width": "300px", "fontSize": "13px"},
+                                ),
+                                html.Label("LBW file:", style={"fontSize": "13px", "marginLeft": "6px"}),
+                                dcc.Input(
+                                    id="flight-lbw-path",
+                                    type="text",
+                                    placeholder="data_files/lb_data_metrics_run_file.txt",
+                                    style={"width": "300px", "fontSize": "13px"},
+                                ),
+                                html.Button("Load", id="flight-load-btn", n_clicks=0),
+                            ],
+                        ),
                         html.Div(id="status-msg", style={"color": "#666", "fontSize": "12px"}),
                         html.Div(
-                            style={"marginLeft": "auto", "display": "flex", "gap": "4px"},
+                            style={"marginLeft": "auto", "display": "flex", "gap": "4px", "flexWrap": "wrap"},
                             children=[
+                                html.Button("Flight live", id="tab-btn-flight", n_clicks=0, style=TAB_BTN),
                                 html.Button("Heatmaps", id="tab-btn-heat", n_clicks=0, style=TAB_BTN_ACTIVE),
                                 html.Button("Q-FEM waveforms", id="tab-btn-q", n_clicks=0, style=TAB_BTN),
                                 html.Button("L-FEM waveforms", id="tab-btn-l", n_clicks=0, style=TAB_BTN),
                                 html.Button("Event display", id="tab-btn-evt", n_clicks=0, style=TAB_BTN),
                             ],
                         ),
+                    ],
+                ),
+                html.Div(
+                    id="panel-flight",
+                    style=PANEL_HIDE,
+                    children=[
+                        html.Div(
+                            style={
+                                "display": "grid",
+                                "gridTemplateColumns": "minmax(0, 1.4fr) minmax(0, 0.86fr)",
+                                "gap": "8px",
+                                "marginBottom": "8px",
+                                "marginLeft": "14px",
+                                "marginRight": "14px",
+                                "fontSize": "14px",
+                                "color": "#444",
+                            },
+                            children=[
+                                html.Div(id="flight-full-event-fname", children="--"),
+                                html.Div(
+                                    id="flight-lbw-fname",
+                                    children="--",
+                                    style={"textAlign": "right"},
+                                ),
+                            ],
+                        ),
+                        *[self._fem_row(slot, is_light=False, id_prefix="flight-") for slot in Q_SLOTS],
+                        self._fem_row(LIGHT_SLOT, is_light=True, id_prefix="flight-"),
                     ],
                 ),
                 html.Div(
@@ -521,9 +603,10 @@ class DqmWeb:
             self.trigger_ticks = {}
             self.trigger_meta = {}
 
-    def load_event_record(self, record: EventRecord):
+    def load_event_record(self, record: EventRecord, *, freeze: bool = True):
         with self._lock:
-            self.freeze_live = True
+            if freeze:
+                self.freeze_live = True
             self.evt_number = record.evt_number
             self.charge_slots = {
                 slot: {ch: np.asarray(arr, dtype=np.float32) for ch, arr in channels.items()}
@@ -612,7 +695,9 @@ class DqmWeb:
         self,
         channel: int,
         samples,
-        start_tick: int = 0,
+        *,
+        frame_num: int | None = None,
+        start_sample: int | None = None,
         evt_number: int | None = None,
     ):
         arr = np.asarray(samples, dtype=np.float32)
@@ -620,9 +705,16 @@ class DqmWeb:
             if self.freeze_live:
                 return
             self._maybe_roll_event(evt_number)
-            self.light_channels[channel] = [
-                {"start_sample": int(start_tick), "samples": arr}
-            ]
+            roi: dict = {"samples": arr}
+            if frame_num is not None:
+                roi["frame_num"] = int(frame_num) & 0x7
+            if start_sample is not None:
+                roi["start_sample"] = int(start_sample)
+            elif "start_sample" not in roi:
+                roi["start_sample"] = 0
+            if "frame_num" not in roi:
+                roi["frame_num"] = 0
+            self.light_channels[channel] = [roi]
 
     def _snapshot(self):
         with self._lock:
@@ -696,6 +788,139 @@ class DqmWeb:
 
         return evt_label, heatmaps, lbw_figs
 
+    def _flight_files_updated(self, full_path: str, lbw_path: str) -> bool:
+        changed = False
+        for path in (full_path, lbw_path):
+            if not path or not os.path.isfile(path):
+                continue
+            mt = os.path.getmtime(path)
+            prev = self._flight_mtimes.get(path)
+            if prev is not None and mt != prev:
+                changed = True
+            self._flight_mtimes[path] = mt
+        return changed
+
+    def load_flight_paths(
+        self,
+        full_path: str | None,
+        lbw_path: str | None,
+        *,
+        sync_shared: bool = False,
+    ) -> EventRecord | None:
+        fe = (full_path or "").strip()
+        lbw = (lbw_path or "").strip()
+        record: EventRecord | None = None
+
+        with self._lock:
+            if fe:
+                record, _fe_msg, _meta = load_full_event_from_path(fe)
+                if record is not None:
+                    self.flight_evt_number = record.evt_number
+                    self.flight_charge_slots = {
+                        slot: {ch: arr.copy() for ch, arr in chans.items()}
+                        for slot, chans in record.charge_slots.items()
+                    }
+                    self.flight_light_channels = {
+                        ch: [
+                            {"start_sample": r["start_sample"], "samples": r["samples"].copy()}
+                            for r in rois
+                        ]
+                        for ch, rois in record.light_channels.items()
+                    }
+                    self.flight_trigger_ticks = dict(record.trigger_ticks)
+                    self.flight_trigger_meta = dict(record.trigger_meta)
+                else:
+                    record = None
+                    self._clear_flight_heatmaps()
+            else:
+                self._clear_flight_heatmaps()
+
+            if lbw:
+                lbw_q, lbw_l, _lb_msg = load_lbw_from_path(lbw)
+                self.flight_lbw_charge = lbw_q
+                self.flight_lbw_light = lbw_l
+            else:
+                self.flight_lbw_charge = None
+                self.flight_lbw_light = None
+
+        if sync_shared and record is not None:
+            self.load_event_record(record, freeze=False)
+            with self._lock:
+                self._load_seq += 1
+
+        self._flight_files_updated(fe, lbw)
+        return record
+
+    def _clear_flight_heatmaps(self) -> None:
+        self.flight_evt_number = None
+        self.flight_charge_slots = {s: {} for s in Q_SLOTS}
+        self.flight_light_channels = {}
+        self.flight_trigger_ticks = {}
+        self.flight_trigger_meta = {}
+
+    def _flight_snapshot(self):
+        with self._lock:
+            charge = {
+                slot: {ch: arr.copy() for ch, arr in chans.items()}
+                for slot, chans in self.flight_charge_slots.items()
+            }
+            light = {
+                ch: [
+                    {"start_sample": r["start_sample"], "samples": r["samples"].copy()}
+                    for r in rois
+                ]
+                for ch, rois in self.flight_light_channels.items()
+            }
+            return (
+                self.flight_evt_number,
+                charge,
+                light,
+                self.flight_lbw_charge,
+                self.flight_lbw_light,
+                dict(self.flight_trigger_ticks),
+                dict(self.flight_trigger_meta),
+            )
+
+    def _build_flight_figures(self):
+        evt, charge_slots, light, lbw_q, lbw_l, triggers, tmeta = self._flight_snapshot()
+        _ = evt
+        heatmaps = [
+            make_charge_heatmap_figure(
+                charge_slots.get(slot, {}),
+                title=f"Q-FEM slot {slot}",
+                trigger_x=triggers.get(slot),
+                trig_sample=(tmeta.get(slot) or {}).get("sample"),
+                header_meta=tmeta.get(slot),
+                charge_window_start=FULL_EVENT_CHARGE_START,
+            )
+            for slot in Q_SLOTS
+        ]
+        heatmaps.append(
+            make_light_heatmap_figure(
+                light,
+                title=f"L-FEM slot {LIGHT_SLOT}",
+                trigger_x=triggers.get(LIGHT_SLOT),
+                header_meta=tmeta.get(LIGHT_SLOT),
+            )
+        )
+        lbw_figs = []
+        for i, slot in enumerate(Q_SLOTS):
+            chunk = _slice_q_lbw(lbw_q, i)
+            if chunk is None:
+                lbw_figs.append(self._empty())
+            else:
+                b, r, h = chunk
+                lbw_figs.append(make_lbw_panel_figure(b, r, h, slot_label=f"Q{slot}"))
+        l_chunk = _slice_l_lbw(lbw_l)
+        if l_chunk is None:
+            lbw_figs.append(self._empty())
+        else:
+            b, r, h = l_chunk
+            lbw_figs.append(
+                make_lbw_panel_figure(b, r, h, slot_label=f"L{LIGHT_SLOT}", is_light=True)
+            )
+        return heatmaps, lbw_figs
+
     def _register_callbacks(self):
         figure_outputs = [Output("evt-label", "children")]
         figure_outputs += [Output(f"qfem-slot-{s}", "figure") for s in Q_SLOTS]
@@ -728,6 +953,7 @@ class DqmWeb:
                 State("evt-input", "value"),
                 State("qlag-input", "value"),
                 State("llag-input", "value"),
+                State("active-tab", "data"),
             ],
             running=[
                 (
@@ -737,8 +963,11 @@ class DqmWeb:
                 ),
             ],
         )
-        def refresh(_, _load_clicks, _up, _down, pause_val, file_path, evt_idx, q_lag, l_lag):
+        def refresh(_, _load_clicks, _up, _down, pause_val, file_path, evt_idx, q_lag, l_lag, active_tab):
             triggered = dash.callback_context.triggered_id
+            if active_tab == "flight":
+                return (*((no_update,) * len(figure_outputs)), no_update, no_update, no_update, no_update)
+
             status = no_update
             pause_out = no_update
             evt_out = no_update
@@ -792,14 +1021,105 @@ class DqmWeb:
             evt_label, heatmaps, lbw_figs = self._build_figures()
             return (evt_label, *heatmaps, *lbw_figs, pause_out, status, evt_out, ver_out)
 
+        flight_outputs = [
+            Output("flight-full-event-fname", "children"),
+            Output("flight-lbw-fname", "children"),
+        ]
+        flight_outputs += [Output(f"flight-qfem-slot-{s}", "figure") for s in Q_SLOTS]
+        flight_outputs += [Output("flight-lfem-heatmap", "figure")]
+        for slot in FEM_SLOTS:
+            flight_outputs.append(Output(f"flight-lbw-{slot}", "figure"))
+        flight_outputs += [
+            Output("flight-full-path", "value"),
+            Output("flight-lbw-path", "value"),
+        ]
+
+        def _flight_path_basename(path: str | None) -> str:
+            p = (path or "").strip()
+            return os.path.basename(p) if p else "--"
+
+        @self.app.callback(
+            flight_outputs + [Output("pause-check", "value", allow_duplicate=True)],
+            [
+                Input("update-interval", "n_intervals"),
+                Input("flight-load-btn", "n_clicks"),
+                Input("active-tab", "data"),
+            ],
+            [
+                State("pause-check", "value"),
+                State("flight-full-path", "value"),
+                State("flight-lbw-path", "value"),
+            ],
+            prevent_initial_call="initial_duplicate",
+        )
+        def refresh_flight(_n, _load, active_tab, pause_val, fe_path, lbw_path):
+            if active_tab != "flight":
+                return (no_update,) * (len(flight_outputs) + 1)
+
+            triggered = dash.callback_context.triggered_id
+            fe_resolved, lbw_resolved = resolve_default_flight_paths(fe_path, lbw_path)
+            fe_name = _flight_path_basename(fe_resolved)
+            lbw_name = _flight_path_basename(lbw_resolved)
+            pause_out = no_update
+            n_figs = len(flight_outputs) - 4
+            fe = fe_resolved
+            lbw = lbw_resolved
+
+            fe_path_out = no_update
+            lbw_path_out = no_update
+            if not (fe_path or "").strip() and fe:
+                fe_path_out = fe
+            if not (lbw_path or "").strip() and lbw:
+                lbw_path_out = lbw
+
+            if triggered == "flight-load-btn":
+                pause_out = ["pause"]
+                self.load_flight_paths(fe, lbw, sync_shared=True)
+                heatmaps, lbw_figs = self._build_flight_figures()
+                return (
+                    fe_name,
+                    lbw_name,
+                    *heatmaps,
+                    *lbw_figs,
+                    fe_path_out,
+                    lbw_path_out,
+                    pause_out,
+                )
+
+            paused = bool(pause_val and "pause" in pause_val)
+            if paused and not self._flight_files_updated(fe, lbw):
+                return (
+                    fe_name,
+                    lbw_name,
+                    *((no_update,) * n_figs),
+                    fe_path_out,
+                    lbw_path_out,
+                    pause_out,
+                )
+
+            self.load_flight_paths(fe, lbw, sync_shared=True)
+            heatmaps, lbw_figs = self._build_flight_figures()
+            return (
+                fe_name,
+                lbw_name,
+                *heatmaps,
+                *lbw_figs,
+                fe_path_out,
+                lbw_path_out,
+                pause_out,
+            )
+
         @self.app.callback(
             Output("status-msg", "children", allow_duplicate=True),
             Input("pause-check", "value"),
+            State("active-tab", "data"),
             prevent_initial_call=True,
         )
-        def on_pause_toggle(pause_val):
+        def on_pause_toggle(pause_val, active_tab):
             with self._lock:
-                self.freeze_live = bool(pause_val and "pause" in pause_val)
+                # Flight live Pause only stops file polling; do not freeze MQTT live.
+                if active_tab != "flight":
+                    self.freeze_live = bool(pause_val and "pause" in pause_val)
             return no_update
 
         @self.app.callback(Output("update-interval", "interval"), Input("refresh-ms", "value"))
@@ -810,26 +1130,34 @@ class DqmWeb:
 
         @self.app.callback(
             Output("update-interval", "disabled"),
-            Input("pause-check", "value"),
+            [Input("pause-check", "value"), Input("active-tab", "data")],
         )
-        def toggle_interval(pause_val):
-            # Stop live ticks entirely while frozen so they can't race/overwrite
-            # offline browsing (Load / step arrows / channel selection).
-            return bool(pause_val and "pause" in pause_val)
+        def toggle_interval(pause_val, active_tab):
+            paused = bool(pause_val and "pause" in pause_val)
+            # Flight live: keep interval running while paused so replaced files
+            # can be picked up via mtime; the flight callback skips redraw otherwise.
+            if active_tab == "flight":
+                return False
+            return paused
 
         @self.app.callback(
             [
                 Output("active-tab", "data"),
+                Output("panel-flight", "style"),
                 Output("panel-heat", "style"),
                 Output("panel-q", "style"),
                 Output("panel-l", "style"),
                 Output("panel-evt", "style"),
+                Output("offline-controls", "style"),
+                Output("flight-controls", "style"),
+                Output("tab-btn-flight", "style"),
                 Output("tab-btn-heat", "style"),
                 Output("tab-btn-q", "style"),
                 Output("tab-btn-l", "style"),
                 Output("tab-btn-evt", "style"),
             ],
             [
+                Input("tab-btn-flight", "n_clicks"),
                 Input("tab-btn-heat", "n_clicks"),
                 Input("tab-btn-q", "n_clicks"),
                 Input("tab-btn-l", "n_clicks"),
@@ -837,21 +1165,36 @@ class DqmWeb:
             ],
             State("active-tab", "data"),
         )
-        def switch_tab(n_heat, n_q, n_l, n_evt, current):
+        def switch_tab(n_flight, n_heat, n_q, n_l, n_evt, current):
             triggered = dash.callback_context.triggered_id
-            order = ["heat", "q", "l", "evt"]
+            order = ["flight", "heat", "q", "l", "evt"]
             by_btn = {
-                "tab-btn-heat": "heat", "tab-btn-q": "q",
-                "tab-btn-l": "l", "tab-btn-evt": "evt",
+                "tab-btn-flight": "flight",
+                "tab-btn-heat": "heat",
+                "tab-btn-q": "q",
+                "tab-btn-l": "l",
+                "tab-btn-evt": "evt",
             }
             tab = by_btn.get(triggered, current or "heat")
 
-            styles = [PANEL_HIDE] * 4
-            btn_styles = [TAB_BTN] * 4
+            panel_styles = [PANEL_HIDE] * 5
+            btn_styles = [TAB_BTN] * 5
             idx = order.index(tab)
-            styles[idx] = PANEL_SHOW
+            panel_styles[idx] = PANEL_SHOW
             btn_styles[idx] = TAB_BTN_ACTIVE
-            return tab, *styles, *btn_styles
+
+            offline_style = PANEL_HIDE if tab == "flight" else {
+                "display": "flex", "gap": "10px", "alignItems": "center", "flexWrap": "wrap",
+            }
+            flight_ctrl_style = PANEL_SHOW if tab == "flight" else PANEL_HIDE
+
+            return (
+                tab,
+                *panel_styles,
+                offline_style,
+                flight_ctrl_style,
+                *btn_styles,
+            )
 
         @self.app.callback(
             Output("qdetail-graph", "figure"),
