@@ -5,6 +5,11 @@ from slow_controls.grafana_link import GrafanaLink
 from slow_controls.mysql_link import MysqlLink
 from datamon import DaqCompMonitor, TpcReadoutMonitor, LowBwTpcMonitor, CommCodes, TelemCodes
 from datamon import TpcMonitorChargeEvent, TpcMonitorLightEvent
+try:
+    from datamon import TpcMonitorFemHeader, TpcMonitorFullEventComplete
+except ImportError:
+    TpcMonitorFemHeader = None
+    TpcMonitorFullEventComplete = None
 from data_monitoring.dqm_web import DqmWeb
 
 from threading import Thread
@@ -39,6 +44,8 @@ class ConnectionInterface:
         self.data_monitor_lb = {"name": "lb_data_metrics", "run": 0, "file": None}
         self.data_monitor_charge = {"name": "charge_data_metrics", "run": 0, "file": None}
         self.data_monitor_light = {"name": "light_data_metrics", "run": 0, "file": None}
+        self.data_monitor_full_event = {"name": "full_event", "run": 0, "file": None}
+        self.full_event_assemblies = {}
 
         # Start the Grafana link
         self.grafana_link = GrafanaLink(mqtt_broker_addr=self.mqtt_broker_address, mqtt_port=self.mqtt_broker_port)
@@ -86,6 +93,10 @@ class ConnectionInterface:
             0x4002: TpcMonitorChargeEvent(),
             0x4003: TpcMonitorLightEvent()
         }
+        if TpcMonitorFemHeader is not None:
+            self.deserializers[0x4004] = TpcMonitorFemHeader()
+        if TpcMonitorFullEventComplete is not None:
+            self.deserializers[0x4005] = TpcMonitorFullEventComplete()
 
         self.device_title = [
                 {'name': device_name, 'title': device_name + " [" + str(self.device_dict[device_name]) + "]"}
@@ -225,27 +236,232 @@ class ConnectionInterface:
             for key, value in data.items():
                 file_dict["file"].create_dataset(key, data=value)
         else:
-            print(json.dumps(data) + "\n")
-            file_dict["file"].write(json.dumps(data))
+            file_dict["file"].write(json.dumps(data) + "\n")
             file_dict["file"].flush()
 
+    def write_ndjson_line(self, record, file_dict, run_number, file_number):
+        """Append one NDJSON record; opens data_files/{name}_{run}_{file}.txt if needed."""
+        if file_dict["run"] != run_number or file_dict.get("file_number") != file_number:
+            if file_dict["file"] is not None and not file_dict["file"].closed:
+                file_dict["file"].close()
+            file_dict["run"] = run_number
+            file_dict["file_number"] = file_number
+            file_dict = self.open_txt_data_monitor_file(file_dict, file_number=file_number)
+        file_dict["file"].write(json.dumps(record) + "\n")
+        file_dict["file"].flush()
+        return file_dict
+
+    Q_SLOTS = (13, 14, 15)
+    LIGHT_SLOT = 16
+    CHANNELS_PER_QFEM = 64
+    SLOT_TO_FEM = {13: "QFEM1", 14: "QFEM2", 15: "QFEM3", 16: "LFEM"}
+
+    @staticmethod
+    def _full_event_key(run_number, file_number, evt_number):
+        return (int(run_number), int(file_number), int(evt_number))
+
+    def _new_full_event_assembly(self, run_number, file_number, evt_number):
+        return {
+            "run_number": int(run_number),
+            "file_number": int(file_number),
+            "evt_number": int(evt_number),
+            "l_lag": None,
+            "fem_headers": {},
+            "charge": {},
+            "light_rois": [],
+            "full_event_stream": False,
+        }
+
+    @classmethod
+    def _slot_for_global_channel(cls, channel):
+        slot_idx = int(channel) // cls.CHANNELS_PER_QFEM
+        local_ch = int(channel) % cls.CHANNELS_PER_QFEM
+        if slot_idx < len(cls.Q_SLOTS):
+            return cls.Q_SLOTS[slot_idx], local_ch
+        return cls.Q_SLOTS[0], int(channel)
+
+    def _apply_full_event_trigger_meta(self, assembly):
+        trigger_meta = {}
+        for slot, meta in assembly["fem_headers"].items():
+            trigger_meta[int(slot)] = {
+                "event_id": meta["event_id"],
+                "frame_id": meta["frame_id"],
+                "frame": meta["trigger_frame"],
+                "sample": meta["trigger_sample"],
+                "abs": meta["trigger_frame"] * 256 + meta["trigger_sample"],
+            }
+        if hasattr(self.monitor, "apply_trigger_meta"):
+            self.monitor.apply_trigger_meta(trigger_meta, evt_number=assembly["evt_number"])
+        elif hasattr(self.monitor, "trigger_meta"):
+            with self.monitor._lock:
+                self.monitor.evt_number = assembly["evt_number"]
+                self.monitor.trigger_meta = trigger_meta
+                self.monitor.freeze_live = True
+
+    def _flush_full_event_records(self, assembly, complete_data):
+        run_number = assembly["run_number"]
+        file_number = assembly["file_number"]
+        evt_number = assembly["evt_number"]
+        status_code = int(complete_data.get("status_code", 0))
+
+        if status_code == 0:
+            for slot in sorted(assembly["fem_headers"].keys()):
+                meta = assembly["fem_headers"][slot]
+                self.data_monitor_full_event = self.write_ndjson_line(
+                    {
+                        "record": "fem_header",
+                        "slot": int(slot),
+                        "fem": self.SLOT_TO_FEM.get(int(slot), f"slot{slot}"),
+                        "event_id": meta["event_id"],
+                        "frame_id": meta["frame_id"],
+                        "trigger_frame": meta["trigger_frame"],
+                        "trigger_sample": meta["trigger_sample"],
+                    },
+                    self.data_monitor_full_event,
+                    run_number,
+                    file_number,
+                )
+
+            for slot_idx, slot in enumerate(self.Q_SLOTS):
+                ch_start = slot_idx * self.CHANNELS_PER_QFEM
+                ch_end = ch_start + self.CHANNELS_PER_QFEM
+                channels = {}
+                for ch in range(ch_start, ch_end):
+                    key = str(ch)
+                    if key in assembly["charge"]:
+                        _, local_ch = self._slot_for_global_channel(ch)
+                        channels[str(local_ch)] = assembly["charge"][key]
+                self.data_monitor_full_event = self.write_ndjson_line(
+                    {
+                        "record": "charge",
+                        "fem": self.SLOT_TO_FEM[slot],
+                        "slot": slot,
+                        "channels": channels,
+                    },
+                    self.data_monitor_full_event,
+                    run_number,
+                    file_number,
+                )
+
+            rois = [
+                {
+                    "channel": roi["channel"],
+                    "start_tick": roi["start_tick"],
+                    "samples": roi["light_samples"],
+                }
+                for roi in assembly["light_rois"]
+            ]
+            self.data_monitor_full_event = self.write_ndjson_line(
+                {
+                    "record": "light",
+                    "fem": "LFEM",
+                    "slot": self.LIGHT_SLOT,
+                    "rois": rois,
+                },
+                self.data_monitor_full_event,
+                run_number,
+                file_number,
+            )
+            self._apply_full_event_trigger_meta(assembly)
+
+        self.data_monitor_full_event = self.write_ndjson_line(
+            {
+                "record": "complete",
+                "run_number": run_number,
+                "file_number": file_number,
+                "evt_number": evt_number,
+                "l_lag": complete_data.get("l_lag"),
+                "status_code": status_code,
+                "num_fem_headers": complete_data.get("num_fem_headers", 0),
+                "num_charge_packets": complete_data.get("num_charge_packets", 0),
+                "num_light_packets": complete_data.get("num_light_packets", 0),
+            },
+            self.data_monitor_full_event,
+            run_number,
+            file_number,
+        )
 
     def data_monitor_handler(self, command, deserialized_data):
         if command == 0x4001: # low-bandwidth waveform metrics
             self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_lb)
             self.display_data(deserialized_data)
         elif command == 0x4002: # charge waveforms
-            print(deserialized_data)
-            self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_charge)
-            if deserialized_data["channel_number"] != self.tmp_ctr or len(deserialized_data["charge_samples"]) != 256:
-                print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["charge_samples"]))
-            self.tmp_ctr += 1
-            if deserialized_data["channel_number"] == 191: self.tmp_ctr = 0
-            self.display_charge_event(deserialized_data)
+            key = self._full_event_key(
+                deserialized_data["run_number"],
+                deserialized_data["file_number"],
+                deserialized_data["evt_number"],
+            )
+            asm = self.full_event_assemblies.get(key)
+            if asm is not None and asm.get("full_event_stream"):
+                asm["charge"][str(deserialized_data["channel_number"])] = deserialized_data["charge_samples"]
+                self.display_charge_event(deserialized_data)
+            else:
+                print(deserialized_data)
+                self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_charge)
+                if deserialized_data["channel_number"] != self.tmp_ctr or len(deserialized_data["charge_samples"]) != 256:
+                    print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["charge_samples"]))
+                self.tmp_ctr += 1
+                if deserialized_data["channel_number"] == 191:
+                    self.tmp_ctr = 0
+                self.display_charge_event(deserialized_data)
         elif command == 0x4003: # light waveforms
-            self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_light)
-            print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["light_samples"]))
-            self.display_light_event(deserialized_data)
+            key = self._full_event_key(
+                deserialized_data["run_number"],
+                deserialized_data["file_number"],
+                deserialized_data["evt_number"],
+            )
+            asm = self.full_event_assemblies.get(key)
+            if asm is not None and asm.get("full_event_stream"):
+                asm["light_rois"].append(
+                    {
+                        "channel": deserialized_data["channel_number"],
+                        "start_tick": deserialized_data.get("start_tick", 0),
+                        "light_samples": deserialized_data["light_samples"],
+                    }
+                )
+                self.display_light_event(deserialized_data)
+            else:
+                self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_light)
+                print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["light_samples"]))
+                self.display_light_event(deserialized_data)
+        elif command == 0x4004:  # FEM headers for full event (buffer only until complete)
+            key = self._full_event_key(
+                deserialized_data["run_number"],
+                deserialized_data["file_number"],
+                deserialized_data["evt_number"],
+            )
+            asm = self.full_event_assemblies.setdefault(
+                key,
+                self._new_full_event_assembly(
+                    deserialized_data["run_number"],
+                    deserialized_data["file_number"],
+                    deserialized_data["evt_number"],
+                ),
+            )
+            asm["full_event_stream"] = True
+            asm["fem_headers"][int(deserialized_data["slot_number"])] = {
+                "event_id": deserialized_data["event_id"],
+                "frame_id": deserialized_data["frame_id"],
+                "trigger_frame": deserialized_data["trigger_frame"],
+                "trigger_sample": deserialized_data["trigger_sample"],
+            }
+        elif command == 0x4005:  # full event complete marker
+            key = self._full_event_key(
+                deserialized_data["run_number"],
+                deserialized_data["file_number"],
+                deserialized_data["evt_number"],
+            )
+            asm = self.full_event_assemblies.pop(
+                key,
+                self._new_full_event_assembly(
+                    deserialized_data["run_number"],
+                    deserialized_data["file_number"],
+                    deserialized_data["evt_number"],
+                ),
+            )
+            if deserialized_data.get("status_code", 0) != 0:
+                print("Full event telemetry failed:", deserialized_data)
+            self._flush_full_event_records(asm, deserialized_data)
 
     def deserialize_telemetry_args(self):
         print("Starting telemetry stream deserialization..")
@@ -258,7 +474,7 @@ class ConnectionInterface:
                     if self.db_link is not None and command in list(self.command_to_db_table.keys()):
                         print(f"WRITE to DB {command}")
                         self.db_link.write_to_database(metrics=deserialized_data, table=self.command_to_db_table[command])
-                    if command in [0x4001, 0x4002, 0x4003]:
+                    if command in [0x4001, 0x4002, 0x4003, 0x4004, 0x4005]:
                         self.data_monitor_handler(command=command, deserialized_data=deserialized_data)
                 else:
                     deserialized_data = self.deserialize_telemetry(command=telem["cmd_packet"].command,
