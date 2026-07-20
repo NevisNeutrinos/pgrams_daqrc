@@ -980,38 +980,147 @@ def make_qt_figure(charge_slots_dict, window_size=200, restrict_window=True):
     )
 
     fig.update_layout(
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-        title="Position vs Time",
-        margin=dict(l=48, r=12, t=36, b=32) 
-    )
-    fig.update_xaxes(title_text="2MHz Sample Number", row=2, col=1)
-    fig.update_yaxes(title_text="x Position (wire spacings)", row=1, col=1)
-    fig.update_yaxes(title_text="y Position (wire spacings)", row=2, col=1)
-=======
-        title="X Position vs Time",
-        xaxis_title="2MHz Sample Number",
-        yaxis_title="Position (wire-spacings)",
-        margin=dict(l=48, r=12, t=36, b=32) 
-    )
->>>>>>> b6c51ad (Added Event Display tab x vs t and y vs t plots)
-=======
-        title="Position vs Time",
-        margin=dict(l=48, r=12, t=36, b=32) 
-    )
-    fig.update_xaxes(title_text="2MHz Sample Number", row=2, col=1)
-    fig.update_yaxes(title_text="x Position (wire spacings)", row=1, col=1)
-    fig.update_yaxes(title_text="y Position (wire spacings)", row=2, col=1)
->>>>>>> 2c8212f (Removed all pycache)
-=======
         title="Position (wire spacings) vs Time (2MHz Sample Number)",
         margin=dict(l=48, r=12, t=80, b=32) 
     )
     fig.update_yaxes(title_text="2MHz Sample Number", row=1, col=1)
     fig.update_xaxes(title_text="x", row=1, col=1)
     fig.update_xaxes(title_text="y", row=1, col=2)
->>>>>>> 1f336f0 (Created event display with correct mapping)
+
+    return fig
+
+def make_qt_figure_testing(charge_slots_dict, window_size=200, restrict_window=True):
+    """Generates the X Position vs Time event display."""
+    coords = coord_mapping()
+
+    if not charge_slots_dict:
+        # Re-using your existing helper function for empty plots
+        from plot_utils import _empty_figure 
+        return _empty_figure("X Position vs Time", "(no data)")
+    
+    charge_slots = pd.DataFrame(charge_slots_dict)
+
+    slot_thirteen = np.vstack(np.array(charge_slots[13]))
+    slot_fourteen = np.vstack(np.array(charge_slots[14]))
+    slot_fifteen = np.vstack(np.array(charge_slots[15]))
+
+    all_channels = np.vstack((slot_fourteen,slot_fifteen,slot_thirteen))
+
+    all_channels = all_channels - np.median(all_channels, axis=1)[:,None]
+
+    #Get max ADC index:
+    flat_max_ADC_idx = np.argmax(all_channels)
+    max_row_idx, max_col_idx = np.unravel_index(flat_max_ADC_idx, all_channels.shape)
+
+    #RESTRICT TIME WINDOW:
+    if restrict_window:
+        #Snip ADC timestamps to only be 200 samples + / - the maximum ADC value's timestamp:
+        all_channels = all_channels[:,np.max((max_col_idx-(window_size//4),0)): max_col_idx + window_size]
+
+    #all_channels is ordered according to channels, 0:191, as is coords.
+    #We will simply snip the missing channels from both arrays, preserving the ordering:
+    missing_channel_mask = ~((coords[:,1] == -159) & (coords[:,2] == -159))
+
+    all_channels = all_channels[missing_channel_mask,:]
+    coords = coords[missing_channel_mask,:]
+
+    x_mask = (coords[:,1] != -159)
+    x_coords = coords[:,1][x_mask]
+    x_ADC = all_channels[x_mask,:]
+    x_ADC_max = x_ADC.max()
+
+    y_mask = (coords[:,2] != -159)
+    y_coords = coords[:,2][y_mask]
+    y_ADC = all_channels[y_mask,:]
+    y_ADC_max = y_ADC.max()
+
+    #Finally, sort the x and y coords in ascending order:
+    x_sorter = np.argsort(x_coords)
+    y_sorter = np.argsort(y_coords)
+    
+    x_coords = x_coords[x_sorter]
+    x_ADC = x_ADC[x_sorter,:]
+    
+    y_coords = y_coords[y_sorter]
+    y_ADC = y_ADC[y_sorter,:]
+
+    #Let's add in a list of 0 ADC values at the missing coordinates:
+
+    x_diffs = np.diff(x_coords)
+    missing_idx = np.where(x_diffs != 1)
+    for idx in missing_idx:
+        x_coords = np.insert(x_coords, idx+1, x_coords[idx]+1)
+        x_ADC = np.insert(x_ADC, idx+1, np.full(x_ADC.shape[1], 0), axis=0)
+
+    y_diffs = np.diff(y_coords)
+    missing_idx = np.where(y_diffs != 1)
+    for idx in missing_idx:
+        y_coords = np.insert(y_coords, idx+1, y_coords[idx]+1)
+        y_ADC = np.insert(y_ADC, idx+1, np.full(y_ADC.shape[1], 0), axis=0)
+
+    ADC_max = np.max((x_ADC_max,y_ADC_max))
+
+    t = np.arange(0,all_channels.shape[1],1)
+
+    fig = make_subplots(
+        rows=1, cols=2, 
+        shared_yaxes=True,
+        #shared_xaxes=True,           # Locks the x-axis panning/zooming together
+        horizontal_spacing=0.1,       # Gap between the two plots
+        subplot_titles=("x vs t", "y vs t") # Optional
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=x_ADC.transpose(),
+            x=x_coords,
+            y=t,
+            zmax=ADC_max,
+            zmid=0,
+            zmin=-ADC_max,
+            colorscale=[
+                        [0.0, '#35DFE5'],
+                        [0.35, '#4261FF'],
+                        [0.5, '#000000'],
+                        [0.65, '#FF0000'],
+                        [0.85, '#FFAE00'],
+                        [1.0, '#FFFFFF']
+                        ],
+            hovertemplate="x: %{x}<br>t: %{y}<br>ADC: %{z}<extra></extra>",
+            showscale=False
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Heatmap(
+            z=y_ADC.transpose(),
+            x=y_coords,
+            y=t,
+            zmax=ADC_max,
+            zmid=0,
+            zmin=-ADC_max,
+            colorscale=[
+                        [0.0, '#35DFE5'],
+                        [0.35, '#4261FF'],
+                        [0.5, '#000000'],
+                        [0.65, '#FF0000'],
+                        [0.85, '#FFAE00'],
+                        [1.0, '#FFFFFF']
+                        ],
+            colorbar=dict(title="ADC", len=0.8, thickness=12, y=-0.35, orientation='h', title_side='top'),
+            hovertemplate="y: %{x}<br>t: %{y}<br>ADC: %{z}<extra></extra>"
+        ),
+        row=1, col=2
+    )
+
+    fig.update_layout(
+        title="Position (wire spacings) vs Time (2MHz Sample Number)",
+        margin=dict(l=48, r=12, t=80, b=32) 
+    )
+    fig.update_yaxes(title_text="2MHz Sample Number", row=1, col=1)
+    fig.update_xaxes(title_text="x", row=1, col=1)
+    fig.update_xaxes(title_text="y", row=1, col=2)
 
     return fig
 

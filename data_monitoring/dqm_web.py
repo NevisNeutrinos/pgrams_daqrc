@@ -1265,8 +1265,8 @@ class DqmWeb:
             
             # 4. Pass the charge dictionary to your plotting function
             # return make_qt_figure_horizontal(charge_slots)
-            return make_qt_figure_testing(charge_slots, restrict_window=True)
-            #return make_qt_figure(charge_slots, restrict_window=True)
+            #return make_qt_figure_testing(charge_slots, restrict_window=True)
+            return make_qt_figure(charge_slots, restrict_window=True)
         
         # @self.app.callback(
         #     Output("evt-display-graph", "figure"),
