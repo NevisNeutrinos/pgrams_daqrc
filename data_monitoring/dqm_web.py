@@ -574,7 +574,14 @@ class DqmWeb:
                 html.Div(
                     id="panel-evt",
                     style=PANEL_HIDE,
-                    children=[dcc.Graph(id="evt-display-graph", style={"width": "96%"})],
+                    children=[dcc.Graph(id="evt-display-graph", style={"width": "96%"}),
+                              html.Div(style={"width": 600, 'marginLeft': '30%', 'marginBottom': '5%', 'padding': '20px'}, 
+                                       children=[dcc.Graph(id="evt-display-l-graph", style={"width": "96%"}),
+                                                 html.Label("L-FEM Time Bin (t):", style={"fontWeight": "bold"}),
+                                                 dcc.Slider(id="lt-time-slider", min=0, max=998, step=1, value=0,
+                                                             #marks={i: str(i) for i in range(0, 1000, 100)},
+                                                               #tooltip={"placement": "bottom", "always_visible": True},
+                                                                 updatemode='drag')])],
                 ),
                 dcc.Store(id="active-tab", data="heat"),
                 dcc.Store(id="event-version", data=0),
@@ -1268,31 +1275,32 @@ class DqmWeb:
             #return make_qt_figure_testing(charge_slots, restrict_window=True)
             return make_qt_figure(charge_slots, restrict_window=True)
         
-        # @self.app.callback(
-        #     Output("evt-display-graph", "figure"),
-        #     [
-        #         Input("update-interval", "n_intervals"),
-        #         Input("active-tab", "data"),
-        #         Input("event-version", "data"),
-        #     ],
-        # )
+        @self.app.callback(
+            Output("evt-display-l-graph", "figure"),
+            [
+                Input("update-interval", "n_intervals"),
+                Input("active-tab", "data"),
+                Input("event-version", "data"),
+                Input("lt-time-slider", "value"),
+            ],
+        )
 
-        # def event_display_l_graphs(_n, tab, _ver):
-        #     # 1. Do nothing if the user is on a different tab
-        #     # if tab != "evt":
-        #     #     return no_update
+        def event_display_l_graphs(_n, tab, _ver, t_val):
+            # 1. Do nothing if the user is on a different tab
+            if tab != "evt":
+                return no_update
             
-        #     # 2. Do nothing if the app is paused/frozen (avoids overwriting manual event selection)
-        #     if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
-        #         return no_update
+            # 2. Do nothing if the app is paused/frozen (avoids overwriting manual event selection)
+            if dash.callback_context.triggered_id == "update-interval" and self.is_frozen():
+                return no_update
             
-        #     # 3. Safely pull the data snapshot from the backend
-        #     evt, charge_slots, light, bq, bl, trigger_ticks, trigger_meta = self._snapshot()
+            # 3. Safely pull the data snapshot from the backend
+            evt, charge_slots, light, bq, bl, trigger_ticks, trigger_meta = self._snapshot()
 
-        #     figure = make_lt_figure(light)
+            figure = make_lt_figure(light, t_val)
             
-        #     # 4. Pass the charge dictionary to your plotting function
-        #     return figure
+            # 4. Pass the charge dictionary to your plotting function
+            return figure
 
     def run(self, blocking: bool = False, open_browser: bool = False):
         url = f"http://{self.host}:{self.port}"

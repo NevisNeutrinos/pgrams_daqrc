@@ -1290,7 +1290,7 @@ def L_channel_mapping(input_channels: np.ndarray) -> np.ndarray:
     return coords
 
 
-def make_lt_figure(light, window_size = 50):
+def make_lt_figure(light, t=0):
 
     #Taken from Yinrui's code:
     fired = [
@@ -1299,19 +1299,27 @@ def make_lt_figure(light, window_size = 50):
         if any(len(r["samples"]) > 0 for r in rois)
     ]
     if not fired:
-        return _empty_figure(title, "(no data)")
+        return _empty_figure('PMT Position and Charge at Sample N/A"', "(no data)")
 
     #channels = np.array(list(light.keys()))[:,None]
     #positions = L_channel_mapping(channels)
     positions = L_channel_mapping(np.array(list(light.keys()))[:,None])
 
     ADC_time = []
+    n_samps = []
 
     for ch, rois in light.items():
         
         for roi in rois:
             ADC_time.append([ch, roi['start_sample']] + [ADC for ADC in roi['samples']])
-    
+            n_samps.append(roi['samples'].size)
+
+     #Ensure same # of samples for each ROI (snip extra samples):
+    min_n_samps = min(n_samps)
+
+    for i, roi in enumerate(ADC_time):
+        ADC_time[i] = roi[:min_n_samps]
+
     ADC_time = np.array(ADC_time).astype('f8')
 
     start_times = ADC_time[:,1][:,None]
@@ -1321,7 +1329,7 @@ def make_lt_figure(light, window_size = 50):
     #Yields an array of times, each row corresponds to the corresponding channel_roi-row in ADC_time. This gives us a correspondance b/w time ticks and charge in ADC_time:
     times = np.tile(np.arange(0, ADC_time[:,2:].shape[1]), (ADC_time.shape[0],1)) + start_times
 
-    bin_edges = np.linspace(times.min(), times.max(), 100)
+    bin_edges = np.linspace(times.min(), times.max(), 1000)
 
     #Create an ADC histogram in each ROW. Each row is a ROI / channel. Direct row-correspondance with ADC_time:
     histogram = []
@@ -1338,7 +1346,6 @@ def make_lt_figure(light, window_size = 50):
     for channel in ADC_time[:,0]:
         mask = (positions[:,0] == channel)
         pos_arr.append(positions[mask][0][1:])
-        
 
     pos_arr = np.array(pos_arr)
 
@@ -1347,21 +1354,40 @@ def make_lt_figure(light, window_size = 50):
     min_ADC = histogram.min()
     max_ADC = histogram.max()
 
-    #Placeholder value pre-slider:
-    t = 5
+    t_idx = max(0, min(t, histogram.shape[1] - 1))
+
+    all_coords = L_channel_mapping(np.arange(0,36))
+
+    # VUV_mask = np.isin(pos_arr[:,1], np.array((1,4,7)))
+    # VIS_mask = ~VUV_mask
+
+    fig.add_trace(go.Scatter(
+        x=all_coords[:,1],
+        y=all_coords[:,2],
+        mode='markers',
+        marker=dict(
+            symbol='square',
+            size=30,
+            showscale=False,
+            color='#440154'
+        ),
+        text=[f"Channel: {int(ch)}" for ch in positions[:, 0]],
+        hovertemplate="X: %{x}<br>Y: %{y}<br>Charge: 0.00<extra></extra>"
+    ))
 
     fig.add_trace(go.Scatter(
         x=pos_arr[:, 0],
         y=pos_arr[:, 1],
         mode='markers',
         marker=dict(
+            symbol='square',
             size=30,
-            color=histogram[:,t],
+            color=histogram[:,t_idx],
             colorscale='Viridis', # You can change this to 'Plasma', 'Inferno', etc.
             showscale=True,
             cmin=min_ADC,
             cmax=max_ADC,
-            colorbar=dict(title="Charge")
+            colorbar=dict(title="ADC")
         ),
         text=[f"Channel: {int(ch)}" for ch in positions[:, 0]],
         hovertemplate="X: %{x}<br>Y: %{y}<br>Charge: %{marker.color:.2f}<br>%{text}<extra></extra>"
@@ -1370,7 +1396,10 @@ def make_lt_figure(light, window_size = 50):
     fig.update_layout(
     xaxis=dict(range=[-1, 8]),
     yaxis=dict(range=[-1, 8]),
-    title=f"PMT Position Charge at Sample {times[t]}"
+    title=f"PMT Position and Charge\n({(bin_edges[:-1][t]/64):.2f} < t < {(bin_edges[1:][t]/64):.2f})",
+    width=600,
+    height=600,
+    showlegend=False,
     )
 
     # fig = go.Figure()
