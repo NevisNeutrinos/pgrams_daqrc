@@ -69,7 +69,10 @@ def _apply_light_window_remap(
 
 
 def _parse_ndjson_sessions(path: str) -> list[dict[str, Any]]:
-    """Return list of completed full-event sessions (status_code == 0)."""
+    """Return completed full-event sessions with displayable payload.
+
+    status_code 0 = exact OK; 4 = L_lag used closest (still has waveforms).
+    """
     sessions: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     with open(path, encoding="utf-8") as fh:
@@ -93,7 +96,7 @@ def _parse_ndjson_sessions(path: str) -> list[dict[str, Any]]:
             elif rtype == "complete":
                 if current is not None:
                     current["complete"] = rec
-                    if int(rec.get("status_code", 0)) == 0:
+                    if int(rec.get("status_code", 0)) in (0, 4):
                         sessions.append(current)
                 current = None
     return sessions
@@ -188,15 +191,21 @@ def load_full_event_from_path(path: str) -> tuple[EventRecord | None, str, dict 
     # Multiple completed sessions in one file: use the last successful one.
     record = _session_to_event_record(sessions[-1])
     complete = sessions[-1]["complete"]
+    status_code = int(complete.get("status_code", 0))
+    status_note = "ok" if status_code == 0 else f"status={status_code}"
+    if status_code == 4:
+        status_note = "closest L_lag"
     msg = (
         f"full event run={complete['run_number']} file={complete['file_number']} "
         f"evt={complete['evt_number']} l_lag={complete.get('l_lag')} "
-        f"({os.path.basename(path)})"
+        f"({status_note}) ({os.path.basename(path)})"
     )
     meta = {
         "run_number": int(complete["run_number"]),
         "file_number": int(complete["file_number"]),
         "path": path,
+        "status_code": status_code,
+        "l_lag": complete.get("l_lag"),
     }
     return record, msg, meta
 

@@ -304,8 +304,10 @@ class ConnectionInterface:
         file_number = assembly["file_number"]
         evt_number = assembly["evt_number"]
         status_code = int(complete_data.get("status_code", 0))
+        # 0=OK, 4=L_lag used closest (payload still valid for Flight live).
+        has_payload = status_code in (0, 4)
 
-        if status_code == 0:
+        if has_payload:
             for slot in sorted(assembly["fem_headers"].keys()):
                 meta = assembly["fem_headers"][slot]
                 self.data_monitor_full_event = self.write_ndjson_line(
@@ -462,8 +464,10 @@ class ConnectionInterface:
                     deserialized_data["evt_number"],
                 ),
             )
-            if deserialized_data.get("status_code", 0) != 0:
+            if int(deserialized_data.get("status_code", 0)) not in (0, 4):
                 print("Full event telemetry failed:", deserialized_data)
+            elif int(deserialized_data.get("status_code", 0)) == 4:
+                print("Full event telemetry used closest L_lag:", deserialized_data)
             self._flush_full_event_records(asm, deserialized_data)
 
     def deserialize_telemetry_args(self):
