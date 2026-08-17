@@ -13,12 +13,14 @@ import numpy as np
 Q_SLOTS_DEFAULT = [13, 14, 15]
 LIGHT_SLOT_DEFAULT = 16
 SAMPLES_PER_FRAME = 256
-# Q-FEM readout is trigger-aligned: firmware records a fixed number of
-# pre-trigger samples (256 pre + ~507 post; observed window = 763 samples), so
-# the trigger lands at this column regardless of absolute frame/sample.
-# NOTE: 256 is the documented pre-trigger count, still to be confirmed against
-# firmware (the readout could instead be frame-aligned -> 256 + trig_sample).
+# Q-FEM readout is trigger-aligned: 256 pre + ~507 post (observed 763 samples).
+# FEMHeader6 trigger_sample is the in-frame 2 MHz clock (0–255), not a waveform index.
 Q_PRETRIGGER_SAMPLES = 256
+# Must match GramsReadout constants.h LBW_*_SCALE (uint16 packing).
+# Unscale only when displaying 0x4001 telemetry (Flight live), never offline.
+LBW_BASELINE_SCALE = 10.0
+LBW_RMS_SCALE = 100.0
+LBW_HIT_SCALE = 10.0
 
 # L-FEM (light) timing. SiPM digitizes at 64 MHz, 1 frame = 128 us = 8192 ticks.
 # frame_num is a 3-bit (mod-8) master frame counter; the light readout window is
@@ -379,6 +381,8 @@ def decode_light(payload32: list[int]) -> dict[int, list[dict]]:
             light_hdr_idx = 3
             continue
         if hdr_tag == 0b11:
+            # Last ADC value (PDF: bits[13:12]==3), then ROI end.
+            roi["samples"].append(w & 0xFFF)
             roi["samples"] = np.asarray(roi["samples"], dtype=np.int32)
             out.setdefault(roi["channel"], []).append(roi)
             roi = None

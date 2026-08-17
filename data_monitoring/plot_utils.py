@@ -101,9 +101,31 @@ def charge_heatmap_zlim(img_sub: np.ndarray) -> float:
         return Q_CHARGE_Z_FLOOR
     return max(float(np.max(np.abs(finite))), Q_CHARGE_Z_FLOOR)
 
-# Offline Q hit count: samples above median + max(Q_HIT_SIGMA_MULT * RMS, Q_HIT_MIN_ADC).
-Q_HIT_SIGMA_MULT = 3.0
-Q_HIT_MIN_ADC = 1.0
+# Match GramsReadout charge_algs / light_algs (per-event). No max−min reject, no SEM.
+Q_PED_T0 = 256
+Q_PED_GUARD = 10
+Q_HIT_SIGMA_MULT = 5.0
+Q_HIT_MIN_ADC = 5.0
+Q_HIT_MIN_WIDTH = 3
+L_TAIL_SAMPLES = 20
+L_TAIL_EXCLUDE_LAST = 2
+
+
+def _count_hits_above(adc: np.ndarray, threshold: float, min_width: int) -> int:
+    above = np.asarray(adc, dtype=np.float64) > threshold
+    if above.size == 0 or not bool(above.any()):
+        return 0
+    padded = np.concatenate(([False], above, [False]))
+    edges = np.diff(padded.astype(np.int8))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+    return int(np.sum((ends - starts) >= min_width))
+
+
+def _pedestal_mean_rms(window: np.ndarray) -> tuple[float, float]:
+    ped = float(np.mean(window))
+    rms = float(np.sqrt(np.mean((window - ped) ** 2)))
+    return ped, rms
 
 
 def compute_charge_lbw(
@@ -111,26 +133,25 @@ def compute_charge_lbw(
     q_slots: list[int],
     channels_per_slot: int = N_QFEM_CHANNELS,
 ) -> tuple[list[float], list[float], list[float]]:
-    """Per-channel baseline (median), RMS (std), and hit count from Q-FEM waveforms.
-
-    Hits: samples with |ADC − median| > max(3*RMS, 1 ADC).
-    """
+    """Per-event charge LBW: pedestal [0, t0−10), hits = runs above ped+max(5,5σ) width≥3."""
     baselines: list[float] = []
     rmses: list[float] = []
     hits: list[float] = []
+    ped_end = Q_PED_T0 - Q_PED_GUARD
     for slot in q_slots:
         channels = charge_slots.get(slot, {})
         for ch in range(channels_per_slot):
-            if ch in channels and len(channels[ch]) > 0:
-                arr = np.asarray(channels[ch], dtype=np.float64)
-                b = float(np.median(arr))
-                r = float(np.std(arr))
-                delta = max(Q_HIT_SIGMA_MULT * r, Q_HIT_MIN_ADC)
-                h = float(np.sum(np.abs(arr - b) > delta))
-            else:
-                b, r, h = 0.0, 0.0, 0.0
-            baselines.append(b)
-            rmses.append(r)
+            arr = np.asarray(channels[ch], dtype=np.float64) if ch in channels else np.array([])
+            end = min(ped_end, int(arr.size))
+            if end < 2:
+                baselines.append(0.0)
+                rmses.append(0.0)
+                hits.append(0.0)
+                continue
+            ped, rms = _pedestal_mean_rms(arr[:end])
+            h = float(_count_hits_above(arr, ped + max(Q_HIT_MIN_ADC, Q_HIT_SIGMA_MULT * rms), Q_HIT_MIN_WIDTH))
+            baselines.append(ped)
+            rmses.append(rms)
             hits.append(h)
     return baselines, rmses, hits
 
@@ -139,25 +160,31 @@ def compute_light_lbw(
     light_channels: dict[int, list[dict]],
     nchan: int = N_LIGHT_CHANNELS,
 ) -> tuple[list[float], list[float], list[float]]:
-    """Per-channel baseline (median), RMS (std), and ROI count from L-FEM data."""
+    """Per-event light LBW: hit = ROI count; pedestal = [-22, -3] tail (all ROIs long enough)."""
     baselines: list[float] = []
     rmses: list[float] = []
     hits: list[float] = []
+    need = L_TAIL_EXCLUDE_LAST + L_TAIL_SAMPLES
     for ch in range(nchan):
-        rois = light_channels.get(ch, [])
-        active = [r for r in rois if len(r["samples"]) > 0]
-        if active:
-            all_samples = np.concatenate(
-                [np.asarray(r["samples"], dtype=np.float64) for r in active]
-            )
-            b = float(np.median(all_samples))
-            r = float(np.std(all_samples))
-            h = float(len(active))
+        rois = [r for r in light_channels.get(ch, []) if len(r.get("samples", [])) > 0]
+        hits.append(float(len(rois)))
+        peds: list[float] = []
+        ch_rms: list[float] = []
+        for roi in rois:
+            samples = np.asarray(roi["samples"], dtype=np.float64)
+            if samples.size < need:
+                continue
+            start = samples.size - need
+            end = samples.size - L_TAIL_EXCLUDE_LAST
+            ped, rms = _pedestal_mean_rms(samples[start:end])
+            peds.append(ped)
+            ch_rms.append(rms)
+        if peds:
+            baselines.append(float(np.mean(peds)))
+            rmses.append(float(np.mean(ch_rms)))
         else:
-            b, r, h = 0.0, 0.0, 0.0
-        baselines.append(b)
-        rmses.append(r)
-        hits.append(h)
+            baselines.append(0.0)
+            rmses.append(0.0)
     return baselines, rmses, hits
 
 
@@ -768,20 +795,19 @@ def make_lbw_panel_figure(
     is_light: bool = False,
     height: int = HEATMAP_HEIGHT,
 ) -> go.Figure:
-    """Two-row panel: median±σ (top) + hits (bottom), one figure per FEM."""
+    """Two-row panel: baseline±RMS (top) + hit histogram (bottom). No SEM."""
     n = len(baseline)
     x = list(range(n))
     x_range, x_ticks = _lbw_channel_axis(n, is_light)
-    major_grid, minor_grid = _lbw_grid_positions(n, is_light)
     hit_title = (
         f"{slot_label} hits (ROIs/ch)"
         if is_light
-        else f"{slot_label} hits (|ADC−med|>max({Q_HIT_SIGMA_MULT:g}σ,{Q_HIT_MIN_ADC:g}))"
+        else f"{slot_label} hits (run ≥{Q_HIT_MIN_WIDTH} above ped+max({Q_HIT_MIN_ADC:g},{Q_HIT_SIGMA_MULT:g}σ))"
     )
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.56, 0.44], vertical_spacing=0.10,
-        subplot_titles=(f"{slot_label} median±σ", hit_title),
+        subplot_titles=(f"{slot_label} baseline ± RMS", hit_title),
     )
     fig.add_trace(
         go.Scatter(

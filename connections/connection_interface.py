@@ -11,6 +11,7 @@ except ImportError:
     TpcMonitorFemHeader = None
     TpcMonitorFullEventComplete = None
 from data_monitoring.dqm_web import DqmWeb
+from data_monitoring.flight_telemetry_source import unscale_lbw_packet
 
 from threading import Thread
 from queue import Queue
@@ -209,18 +210,20 @@ class ConnectionInterface:
         )
 
     def display_data(self, data):
+        # Packed 0x4001 integers; unscale only for the Flight live tab.
         print("Updating TPC metrics..")
-        self.monitor.update_lbw(
-            data["charge_baseline"],
-            data["charge_rms"],
-            data["charge_avg_num_hits"],
-            data["light_baseline"],
-            data["light_rms"],
-            data["light_avg_num_hits"],
-            evt_number=data.get("evt_number"),
-        )
+        lbw_q, lbw_l = unscale_lbw_packet(data)
+        if hasattr(self.monitor, "update_flight_lbw"):
+            self.monitor.update_flight_lbw(
+                *lbw_q, *lbw_l, evt_number=data.get("evt_number"),
+            )
+        else:
+            self.monitor.update_lbw(
+                *lbw_q, *lbw_l, evt_number=data.get("evt_number"),
+            )
 
     def write_data_monitor(self, data, file_dict):
+        # Writes deserialized fields as-is (0x4001 stays packed uint16).
         use_hdf5 = False
         print(data)
         # If a file is not already opened for this run, open it

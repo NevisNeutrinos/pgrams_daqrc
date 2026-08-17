@@ -30,7 +30,7 @@ def _demo_feeder(dqm: DqmWeb, interval: float = 3.0):
         hits = [int(rng.integers(0, 5)) for _ in range(len(Q_SLOTS) * CHANNELS_PER_QFEM)]
         l_base = [2050 + int(rng.integers(-20, 20)) for _ in range(36)]
         l_rms = [6 + int(rng.integers(0, 4)) for _ in range(36)]
-        l_hits = [int(rng.integers(0, 3) * 8) for _ in range(36)]
+        l_hits = [int(rng.integers(0, 3)) for _ in range(36)]
         dqm.update_lbw(baselines, rms, hits, l_base, l_rms, l_hits, evt_number=evt)
 
         for slot in Q_SLOTS:

@@ -161,22 +161,22 @@ def _header_match_warnings(record: EventRecord) -> list[str]:
 def _slice_q_lbw(lbw_q: tuple | None, slot_idx: int) -> tuple[list, list, list] | None:
     if lbw_q is None:
         return None
-    bq, rq, hq = lbw_q
+    bq, rq, hq = lbw_q[:3]
     i0 = slot_idx * CHANNELS_PER_QFEM
     i1 = i0 + CHANNELS_PER_QFEM
-    b, r, h = bq[i0:i1], rq[i0:i1], hq[i0:i1]
+    b, r, h = list(bq[i0:i1]), list(rq[i0:i1]), list(hq[i0:i1])
     if len(b) < CHANNELS_PER_QFEM:
         pad = CHANNELS_PER_QFEM - len(b)
-        b = list(b) + [0.0] * pad
-        r = list(r) + [0.0] * pad
-        h = list(h) + [0.0] * pad
+        b = b + [0.0] * pad
+        r = r + [0.0] * pad
+        h = h + [0.0] * pad
     return b, r, h
 
 
 def _slice_l_lbw(lbw_l: tuple | None) -> tuple[list, list, list] | None:
     if lbw_l is None:
         return None
-    return lbw_l
+    return lbw_l[0], lbw_l[1], lbw_l[2]
 
 
 class DqmWeb:
@@ -663,7 +663,7 @@ class DqmWeb:
         light_hits,
         evt_number: int | None = None,
     ):
-        light_hits = [h / 8.0 for h in light_hits]
+        """Offline / demo only. Telemetry 0x4001 must use update_flight_lbw."""
         with self._lock:
             if self.freeze_live:
                 return
@@ -679,6 +679,31 @@ class DqmWeb:
             )
             if evt_number is not None:
                 self.evt_number = evt_number
+
+    def update_flight_lbw(
+        self,
+        charge_baseline,
+        charge_rms,
+        charge_hits,
+        light_baseline,
+        light_rms,
+        light_hits,
+        evt_number: int | None = None,
+    ):
+        """Unscaled 0x4001 arrays for the Flight live tab (no SEM in the packet)."""
+        with self._lock:
+            self.flight_lbw_charge = (
+                list(charge_baseline[:192]),
+                list(charge_rms[:192]),
+                list(charge_hits[:192]),
+            )
+            self.flight_lbw_light = (
+                list(light_baseline),
+                list(light_rms),
+                list(light_hits),
+            )
+            if evt_number is not None:
+                self.flight_evt_number = evt_number
 
     def update_charge_channel(
         self,

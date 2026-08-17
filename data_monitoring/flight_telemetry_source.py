@@ -14,6 +14,9 @@ from data_monitoring.event_source import (
     LIGHT_SLOT_DEFAULT,
     LIGHT_TICKS_PER_FRAME,
     LIGHT_WINDOW_FRAMES,
+    LBW_BASELINE_SCALE,
+    LBW_HIT_SCALE,
+    LBW_RMS_SCALE,
     Q_PRETRIGGER_SAMPLES,
     Q_SAMPLE_TO_LIGHT_TICK,
     Q_SLOTS_DEFAULT,
@@ -210,6 +213,25 @@ def load_full_event_from_path(path: str) -> tuple[EventRecord | None, str, dict 
     return record, msg, meta
 
 
+def unscale_lbw_packet(data: dict) -> tuple[tuple, tuple]:
+    """Divide packed 0x4001 uint16 fields. Disk JSON stays packed; only display unscales."""
+
+    def _unscale(vals, scale):
+        return [v / scale for v in vals]
+
+    lbw_q = (
+        _unscale(data.get("charge_baseline", [])[:192], LBW_BASELINE_SCALE),
+        _unscale(data.get("charge_rms", [])[:192], LBW_RMS_SCALE),
+        _unscale(data.get("charge_avg_num_hits", [])[:192], LBW_HIT_SCALE),
+    )
+    lbw_l = (
+        _unscale(data.get("light_baseline", []), LBW_BASELINE_SCALE),
+        _unscale(data.get("light_rms", []), LBW_RMS_SCALE),
+        _unscale(data.get("light_avg_num_hits", []), LBW_HIT_SCALE),
+    )
+    return lbw_q, lbw_l
+
+
 def load_lbw_from_path(path: str) -> tuple[tuple | None, tuple | None, str]:
     if not os.path.isfile(path):
         return None, None, f"file not found: {path}"
@@ -228,16 +250,7 @@ def load_lbw_from_path(path: str) -> tuple[tuple | None, tuple | None, str]:
     except json.JSONDecodeError as exc:
         return None, None, f"LBW parse error: {exc}"
 
-    lbw_q = (
-        list(data.get("charge_baseline", [])[:192]),
-        list(data.get("charge_rms", [])[:192]),
-        list(data.get("charge_avg_num_hits", [])[:192]),
-    )
-    lbw_l = (
-        list(data.get("light_baseline", [])),
-        list(data.get("light_rms", [])),
-        [h / 8.0 for h in data.get("light_avg_num_hits", [])],
-    )
+    lbw_q, lbw_l = unscale_lbw_packet(data)
     evt = data.get("evt_number", "?")
     msg = f"LBW evt={evt} ({os.path.basename(path)})"
     return lbw_q, lbw_l, msg
