@@ -382,6 +382,7 @@ class ConnectionInterface:
                 "num_fem_headers": complete_data.get("num_fem_headers", 0),
                 "num_charge_packets": complete_data.get("num_charge_packets", 0),
                 "num_light_packets": complete_data.get("num_light_packets", 0),
+                "event_error_bit_word": complete_data.get("event_error_bit_word", 0),
             },
             self.data_monitor_full_event,
             run_number,

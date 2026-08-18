@@ -209,6 +209,7 @@ def load_full_event_from_path(path: str) -> tuple[EventRecord | None, str, dict 
         "path": path,
         "status_code": status_code,
         "l_lag": complete.get("l_lag"),
+        "event_error_bit_word": complete.get("event_error_bit_word", 0),
     }
     return record, msg, meta
 
