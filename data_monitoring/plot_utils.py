@@ -91,6 +91,31 @@ HEATMAP_COLORBAR = dict(len=1.0, thickness=14, x=0.90, xanchor="left")
 COMPACT_MARGIN = dict(l=48, r=12, t=36, b=32)
 HEATMAP_HEIGHT = 290
 LBW_HEIGHT = 92
+ERROR_BIT_CHART_HEIGHT = 195  # 260 * 3/4
+N_EVENT_ERROR_BITS = 32
+# 1-based EventErrorBit names. Unnamed bins still tick as the number only.
+EVENT_ERROR_BIT_NAMES = {
+    1: "missing_fem",
+    2: "wrong_slot",
+    3: "event_number_mismatch",
+    4: "event_frame_mismatch",
+    5: "trig_frame_mismatch",
+    6: "trig_sample_mismatch",
+    7: "missing_channels",
+    8: "adc_count_mismatch",
+    9: "fem_status_warning",
+    10: "event_number_gap",
+    16: "bad_header_tag",
+    17: "checksum_mismatch",
+    18: "dma_timeout",
+}
+FULL_EVENT_STATUS_NAMES = {
+    0: "kOk",
+    1: "kFileNotFound",
+    2: "kEventNotFound",
+    3: "kLlagEventNotFound",
+    4: "kLlagUsedClosest",
+}
 # Minimum half-range for Q ped-sub heatmaps: zlim = max(max(|ADC-med|), Z_FLOOR).
 Q_CHARGE_Z_FLOOR = 5.0
 
@@ -860,7 +885,118 @@ def make_lbw_panel_figure(
     return fig
 
 
-def _empty_figure(title: str, message: str) -> go.Figure:
+def error_bit_tick_label(bit_1based: int) -> str:
+    """X-axis label: `[n]-[name]` if named, otherwise just `n`."""
+    bit = int(bit_1based)
+    name = EVENT_ERROR_BIT_NAMES.get(bit)
+    return f"{bit}-{name}" if name else str(bit)
+
+
+def decode_event_error_bit_numbers(word: int) -> list[int]:
+    """1-based bit indices that are set in an EventErrorBit word."""
+    word = int(word)
+    return [bit for bit in range(1, N_EVENT_ERROR_BITS + 1) if word & (1 << (bit - 1))]
+
+
+def decode_event_error_bits(word: int) -> list[str]:
+    """Return x-axis-style labels for each set 1-based EventErrorBit."""
+    return [error_bit_tick_label(bit) for bit in decode_event_error_bit_numbers(word)]
+
+
+def full_event_status_name(status_code) -> str:
+    if status_code is None:
+        return "--"
+    code = int(status_code)
+    return FULL_EVENT_STATUS_NAMES.get(code, f"status_{code}")
+
+
+def make_error_bit_counts_figure(
+    counts,
+    n_error_events=None,
+    *,
+    event_error_bit_word=None,
+    height: int = ERROR_BIT_CHART_HEIGHT,
+) -> go.Figure:
+    """Full-width 32-bin EventErrorBit counts from LBW `error_bit_words`."""
+    _ = event_error_bit_word
+    if counts is None:
+        return _empty_figure(
+            "LBW readout error bit summary",
+            "no error_bit_words in this LBW packet",
+            height=height,
+        )
+
+    arr = np.asarray(counts, dtype=float).ravel()
+    if arr.size == 0:
+        return _empty_figure(
+            "LBW readout error bit summary",
+            "no error_bit_words in this LBW packet",
+            height=height,
+        )
+    if arr.size < N_EVENT_ERROR_BITS:
+        arr = np.pad(arr, (0, N_EVENT_ERROR_BITS - int(arr.size)))
+    arr = arr[:N_EVENT_ERROR_BITS]
+
+    xs = list(range(1, N_EVENT_ERROR_BITS + 1))
+    ticktext = [error_bit_tick_label(b) for b in xs]
+    y_max = float(np.nanmax(arr)) if arr.size else 0.0
+
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=xs,
+                y=arr.tolist(),
+                marker=dict(color="#3b82f6"),
+                width=0.72,
+                showlegend=False,
+                hovertemplate="bit %{x}: %{y}<extra></extra>",
+            )
+        ]
+    )
+
+    title = "LBW readout error bit summary"
+    if n_error_events is not None:
+        title = f"LBW readout error bit summary    n_sample = {int(n_error_events)}"
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=12)),
+        height=height,
+        margin=dict(l=48, r=12, t=36, b=78),
+        bargap=0.22,
+        showlegend=False,
+    )
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=xs,
+        ticktext=ticktext,
+        tickangle=-50,
+        range=[0.4, N_EVENT_ERROR_BITS + 0.6],
+        tickfont=dict(size=8),
+        showgrid=False,
+        zeroline=False,
+        automargin=True,
+    )
+    ymax = int(np.ceil(max(1.0, y_max * 1.15))) if y_max > 0 else 1
+    if ymax <= 10:
+        dtick = 1
+    elif ymax <= 20:
+        dtick = 2
+    else:
+        dtick = max(1, int(np.ceil(ymax / 6)))
+    fig.update_yaxes(
+        title_text="counts",
+        rangemode="tozero",
+        range=[0, ymax],
+        dtick=dtick,
+        tick0=0,
+        tickformat="d",
+        gridcolor="#eee",
+        zeroline=True,
+    )
+    return fig
+
+
+def _empty_figure(title: str, message: str, height: int = HEATMAP_HEIGHT) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(
         text=message,
@@ -876,7 +1012,7 @@ def _empty_figure(title: str, message: str) -> go.Figure:
         xaxis=dict(visible=False),
         yaxis=dict(visible=False),
         margin=COMPACT_MARGIN,
-        height=HEATMAP_HEIGHT,
+        height=height,
     )
     return fig
 

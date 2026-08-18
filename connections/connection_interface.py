@@ -12,6 +12,7 @@ except ImportError:
     TpcMonitorFullEventComplete = None
 from data_monitoring.dqm_web import DqmWeb
 from data_monitoring.flight_telemetry_source import unscale_lbw_packet
+from data_monitoring.plot_utils import decode_event_error_bits
 
 from threading import Thread
 from queue import Queue
@@ -216,6 +217,8 @@ class ConnectionInterface:
         if hasattr(self.monitor, "update_flight_lbw"):
             self.monitor.update_flight_lbw(
                 *lbw_q, *lbw_l, evt_number=data.get("evt_number"),
+                error_bit_words=data.get("error_bit_words"),
+                n_error_events=data.get("n_error_events"),
             )
         else:
             self.monitor.update_lbw(
@@ -382,7 +385,10 @@ class ConnectionInterface:
                 "num_fem_headers": complete_data.get("num_fem_headers", 0),
                 "num_charge_packets": complete_data.get("num_charge_packets", 0),
                 "num_light_packets": complete_data.get("num_light_packets", 0),
-                "event_error_bit_word": complete_data.get("event_error_bit_word", 0),
+                "event_error_bit_word": int(complete_data.get("event_error_bit_word", 0) or 0),
+                "event_error_bits": decode_event_error_bits(
+                    int(complete_data.get("event_error_bit_word", 0) or 0)
+                ),
             },
             self.data_monitor_full_event,
             run_number,

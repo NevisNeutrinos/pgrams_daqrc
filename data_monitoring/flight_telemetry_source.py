@@ -209,7 +209,7 @@ def load_full_event_from_path(path: str) -> tuple[EventRecord | None, str, dict 
         "path": path,
         "status_code": status_code,
         "l_lag": complete.get("l_lag"),
-        "event_error_bit_word": complete.get("event_error_bit_word", 0),
+        "event_error_bit_word": complete.get("event_error_bit_word"),
     }
     return record, msg, meta
 
@@ -233,9 +233,15 @@ def unscale_lbw_packet(data: dict) -> tuple[tuple, tuple]:
     return lbw_q, lbw_l
 
 
-def load_lbw_from_path(path: str) -> tuple[tuple | None, tuple | None, str]:
+def load_lbw_from_path(path: str) -> tuple[tuple | None, tuple | None, str, dict]:
+    extra: dict = {
+        "error_bit_words": None,
+        "n_error_events": None,
+        "error_bit_word": None,
+        "packet_status_word": None,
+    }
     if not os.path.isfile(path):
-        return None, None, f"file not found: {path}"
+        return None, None, f"file not found: {path}", extra
 
     last_line = None
     with open(path, encoding="utf-8") as fh:
@@ -244,17 +250,21 @@ def load_lbw_from_path(path: str) -> tuple[tuple | None, tuple | None, str]:
             if line:
                 last_line = line
     if not last_line:
-        return None, None, f"empty {os.path.basename(path)}"
+        return None, None, f"empty {os.path.basename(path)}", extra
 
     try:
         data = json.loads(last_line)
     except json.JSONDecodeError as exc:
-        return None, None, f"LBW parse error: {exc}"
+        return None, None, f"LBW parse error: {exc}", extra
 
     lbw_q, lbw_l = unscale_lbw_packet(data)
     evt = data.get("evt_number", "?")
     msg = f"LBW evt={evt} ({os.path.basename(path)})"
-    return lbw_q, lbw_l, msg
+    extra["error_bit_word"] = data.get("error_bit_word")
+    extra["packet_status_word"] = data.get("packet_status_word")
+    extra["n_error_events"] = data.get("n_error_events")
+    extra["error_bit_words"] = data.get("error_bit_words")
+    return lbw_q, lbw_l, msg, extra
 
 
 def load_latest_full_event(data_dir: str = DATA_FILES_DIR) -> tuple[EventRecord | None, str, dict | None]:
@@ -264,8 +274,13 @@ def load_latest_full_event(data_dir: str = DATA_FILES_DIR) -> tuple[EventRecord 
     return load_full_event_from_path(path)
 
 
-def load_latest_lbw(data_dir: str = DATA_FILES_DIR) -> tuple[tuple | None, tuple | None, str]:
+def load_latest_lbw(data_dir: str = DATA_FILES_DIR) -> tuple[tuple | None, tuple | None, str, dict]:
     path = _newest_file(os.path.join(data_dir, "lb_data_metrics_*.txt"))
     if path is None:
-        return None, None, "no lb_data_metrics_*.txt in data_files/"
+        return None, None, "no lb_data_metrics_*.txt in data_files/", {
+            "error_bit_words": None,
+            "n_error_events": None,
+            "error_bit_word": None,
+            "packet_status_word": None,
+        }
     return load_lbw_from_path(path)

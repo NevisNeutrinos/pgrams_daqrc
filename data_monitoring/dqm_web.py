@@ -53,10 +53,14 @@ WF_GRAPH_CONFIG = {
     "modeBarButtonsToRemove": ["select2d", "lasso2d"],
 }
 from data_monitoring.plot_utils import (
+    ERROR_BIT_CHART_HEIGHT,
     HEATMAP_HEIGHT,
     compute_charge_lbw,
     compute_light_lbw,
+    decode_event_error_bit_numbers,
+    full_event_status_name,
     make_charge_heatmap_figure,
+    make_error_bit_counts_figure,
     make_lbw_panel_figure,
     make_lfem_waveform_figure,
     make_light_heatmap_figure,
@@ -201,6 +205,10 @@ class DqmWeb:
         self.flight_trigger_meta: dict[int, dict] = {}
         self.flight_lbw_charge = None
         self.flight_lbw_light = None
+        self.flight_error_bit_words = None
+        self.flight_n_error_events = None
+        self.flight_event_error_bit_word = None
+        self.flight_status_code = None
         self._flight_mtimes: dict[str, float] = {}
         # Bumped after each explicit load/step so figure callbacks rebuild from the
         # freshly loaded snapshot (serializes load -> build, avoids races).
@@ -549,7 +557,11 @@ class DqmWeb:
                                 "color": "#444",
                             },
                             children=[
-                                html.Div(id="flight-full-event-fname", children="--"),
+                                html.Div(
+                                    id="flight-full-event-fname",
+                                    children="--",
+                                    style={"whiteSpace": "normal", "lineHeight": "1.35"},
+                                ),
                                 html.Div(
                                     id="flight-lbw-fname",
                                     children="--",
@@ -559,6 +571,15 @@ class DqmWeb:
                         ),
                         *[self._fem_row(slot, is_light=False, id_prefix="flight-") for slot in Q_SLOTS],
                         self._fem_row(LIGHT_SLOT, is_light=True, id_prefix="flight-"),
+                        dcc.Graph(
+                            id="flight-error-bits",
+                            config={"displayModeBar": False},
+                            style={
+                                "height": f"{ERROR_BIT_CHART_HEIGHT}px",
+                                "width": "100%",
+                                "marginTop": "18px",
+                            },
+                        ),
                     ],
                 ),
                 html.Div(
@@ -689,6 +710,8 @@ class DqmWeb:
         light_rms,
         light_hits,
         evt_number: int | None = None,
+        error_bit_words=None,
+        n_error_events=None,
     ):
         """Unscaled 0x4001 arrays for the Flight live tab (no SEM in the packet)."""
         with self._lock:
@@ -704,6 +727,10 @@ class DqmWeb:
             )
             if evt_number is not None:
                 self.flight_evt_number = evt_number
+            if error_bit_words is not None:
+                self.flight_error_bit_words = error_bit_words
+            if n_error_events is not None:
+                self.flight_n_error_events = n_error_events
 
     def update_charge_channel(
         self,
@@ -864,6 +891,10 @@ class DqmWeb:
                     }
                     self.flight_trigger_ticks = dict(record.trigger_ticks)
                     self.flight_trigger_meta = dict(record.trigger_meta)
+                    self.flight_event_error_bit_word = (_meta or {}).get(
+                        "event_error_bit_word"
+                    )
+                    self.flight_status_code = (_meta or {}).get("status_code")
                 else:
                     record = None
                     self._clear_flight_heatmaps()
@@ -871,12 +902,16 @@ class DqmWeb:
                 self._clear_flight_heatmaps()
 
             if lbw:
-                lbw_q, lbw_l, _lb_msg = load_lbw_from_path(lbw)
+                lbw_q, lbw_l, _lb_msg, extra = load_lbw_from_path(lbw)
                 self.flight_lbw_charge = lbw_q
                 self.flight_lbw_light = lbw_l
+                self.flight_error_bit_words = extra.get("error_bit_words")
+                self.flight_n_error_events = extra.get("n_error_events")
             else:
                 self.flight_lbw_charge = None
                 self.flight_lbw_light = None
+                self.flight_error_bit_words = None
+                self.flight_n_error_events = None
 
         if sync_shared and record is not None:
             self.load_event_record(record, freeze=False)
@@ -886,12 +921,31 @@ class DqmWeb:
         self._flight_files_updated(fe, lbw)
         return record
 
+    @staticmethod
+    def _flight_path_basename(path: str | None) -> str:
+        p = (path or "").strip()
+        return os.path.basename(p) if p else "--"
+
+    def _flight_full_event_caption(self, path: str | None) -> str:
+        name = self._flight_path_basename(path)
+        with self._lock:
+            status = full_event_status_name(self.flight_status_code)
+            word = self.flight_event_error_bit_word
+        if word is None:
+            bits_s = "--"
+        else:
+            bits = decode_event_error_bit_numbers(int(word))
+            bits_s = ", ".join(str(b) for b in bits) if bits else "none"
+        return f"{name}    telemetry status: {status}    error bits: {bits_s}"
+
     def _clear_flight_heatmaps(self) -> None:
         self.flight_evt_number = None
         self.flight_charge_slots = {s: {} for s in Q_SLOTS}
         self.flight_light_channels = {}
         self.flight_trigger_ticks = {}
         self.flight_trigger_meta = {}
+        self.flight_event_error_bit_word = None
+        self.flight_status_code = None
 
     def _flight_snapshot(self):
         with self._lock:
@@ -914,10 +968,24 @@ class DqmWeb:
                 self.flight_lbw_light,
                 dict(self.flight_trigger_ticks),
                 dict(self.flight_trigger_meta),
+                self.flight_error_bit_words,
+                self.flight_n_error_events,
+                self.flight_event_error_bit_word,
             )
 
     def _build_flight_figures(self):
-        evt, charge_slots, light, lbw_q, lbw_l, triggers, tmeta = self._flight_snapshot()
+        (
+            evt,
+            charge_slots,
+            light,
+            lbw_q,
+            lbw_l,
+            triggers,
+            tmeta,
+            err_counts,
+            n_err,
+            event_err_word,
+        ) = self._flight_snapshot()
         _ = evt
         heatmaps = [
             make_charge_heatmap_figure(
@@ -954,7 +1022,12 @@ class DqmWeb:
             lbw_figs.append(
                 make_lbw_panel_figure(b, r, h, slot_label=f"L{LIGHT_SLOT}", is_light=True)
             )
-        return heatmaps, lbw_figs
+        err_fig = make_error_bit_counts_figure(
+            err_counts,
+            n_err,
+            event_error_bit_word=event_err_word,
+        )
+        return heatmaps, lbw_figs, err_fig
 
     def _register_callbacks(self):
         figure_outputs = [Output("evt-label", "children")]
@@ -1065,13 +1138,10 @@ class DqmWeb:
         for slot in FEM_SLOTS:
             flight_outputs.append(Output(f"flight-lbw-{slot}", "figure"))
         flight_outputs += [
+            Output("flight-error-bits", "figure"),
             Output("flight-full-path", "value"),
             Output("flight-lbw-path", "value"),
         ]
-
-        def _flight_path_basename(path: str | None) -> str:
-            p = (path or "").strip()
-            return os.path.basename(p) if p else "--"
 
         @self.app.callback(
             flight_outputs + [Output("pause-check", "value", allow_duplicate=True)],
@@ -1093,8 +1163,7 @@ class DqmWeb:
 
             triggered = dash.callback_context.triggered_id
             fe_resolved, lbw_resolved = resolve_default_flight_paths(fe_path, lbw_path)
-            fe_name = _flight_path_basename(fe_resolved)
-            lbw_name = _flight_path_basename(lbw_resolved)
+            lbw_name = self._flight_path_basename(lbw_resolved)
             pause_out = no_update
             n_figs = len(flight_outputs) - 4
             fe = fe_resolved
@@ -1110,12 +1179,14 @@ class DqmWeb:
             if triggered == "flight-load-btn":
                 pause_out = ["pause"]
                 self.load_flight_paths(fe, lbw, sync_shared=True)
-                heatmaps, lbw_figs = self._build_flight_figures()
+                heatmaps, lbw_figs, err_fig = self._build_flight_figures()
+                fe_name = self._flight_full_event_caption(fe)
                 return (
                     fe_name,
                     lbw_name,
                     *heatmaps,
                     *lbw_figs,
+                    err_fig,
                     fe_path_out,
                     lbw_path_out,
                     pause_out,
@@ -1123,6 +1194,7 @@ class DqmWeb:
 
             paused = bool(pause_val and "pause" in pause_val)
             if paused and not self._flight_files_updated(fe, lbw):
+                fe_name = self._flight_full_event_caption(fe)
                 return (
                     fe_name,
                     lbw_name,
@@ -1133,12 +1205,14 @@ class DqmWeb:
                 )
 
             self.load_flight_paths(fe, lbw, sync_shared=True)
-            heatmaps, lbw_figs = self._build_flight_figures()
+            heatmaps, lbw_figs, err_fig = self._build_flight_figures()
+            fe_name = self._flight_full_event_caption(fe)
             return (
                 fe_name,
                 lbw_name,
                 *heatmaps,
                 *lbw_figs,
+                err_fig,
                 fe_path_out,
                 lbw_path_out,
                 pause_out,
