@@ -1,0 +1,1 @@
+{"error_bit_word": 0, "run_number": 0, "file_number": 0, "evt_number": 0, "packet_status_word": 0, "n_error_events": 0, "error_bit_words": [], "charge_baseline": [], "charge_rms": [], "charge_avg_num_hits": [], "light_baseline": [], "light_rms": [], "light_avg_num_hits": []}
