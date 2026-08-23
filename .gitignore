@@ -1,0 +1,13 @@
+# Python / OS
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local dumps (keep committed *demo* fixtures)
+data_files/
+test_data/
+telemetry_data/*
+!telemetry_data/*demo*
+
+# Local layout previews
+*.png
