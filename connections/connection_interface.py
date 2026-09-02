@@ -119,6 +119,7 @@ class ConnectionInterface:
             if file_dict["file"].id:
                 file_dict["file"].close()
 
+        os.makedirs("data_files", exist_ok=True)
         file_name = "data_files/" + file_dict["name"] + "_" + str(file_dict["run"]) + "_" + str(file_number) + ".hdf5"
         file_dict["file"] = h5py.File(file_name, "w")
 
@@ -133,6 +134,7 @@ class ConnectionInterface:
             if not file_dict["file"].closed:
                 file_dict["file"].close()
 
+        os.makedirs("data_files", exist_ok=True)
         file_name = "data_files/" + file_dict["name"] + "_" + str(file_dict["run"]) + "_" + str(file_number) + ".txt"
         file_dict["file"] = open(file_name, "a")
 
@@ -231,24 +233,19 @@ class ConnectionInterface:
 
     def write_data_monitor(self, data, file_dict):
         # Writes deserialized fields as-is (0x4001 stays packed uint16).
-        use_hdf5 = False
+        # One txt per closed readout file: data_files/{name}_{run}_{file}.txt
         print(data)
-        # If a file is not already opened for this run, open it
-        if file_dict["run"] != data["run_number"]:
-            file_dict["run"] = data["run_number"]
-            if use_hdf5:
-                file_dict = self.open_h5_data_monitor_file(file_dict, file_number=data["file_number"])
-            else:
-                print(file_dict)
-                file_dict = self.open_txt_data_monitor_file(file_dict, file_number=data["file_number"])
-                print(file_dict)
-
-        if use_hdf5:
-            for key, value in data.items():
-                file_dict["file"].create_dataset(key, data=value)
-        else:
-            file_dict["file"].write(json.dumps(data) + "\n")
-            file_dict["file"].flush()
+        run_number = int(data["run_number"])
+        file_number = int(data["file_number"])
+        if file_dict["run"] != run_number or file_dict.get("file_number") != file_number:
+            if file_dict["file"] is not None and not file_dict["file"].closed:
+                file_dict["file"].close()
+            file_dict["run"] = run_number
+            file_dict["file_number"] = file_number
+            file_dict = self.open_txt_data_monitor_file(file_dict, file_number=file_number)
+        file_dict["file"].write(json.dumps(data) + "\n")
+        file_dict["file"].flush()
+        return file_dict
 
     def write_ndjson_line(self, record, file_dict, run_number, file_number):
         """Append one NDJSON record; opens data_files/{name}_{run}_{file}.txt if needed."""
@@ -401,7 +398,9 @@ class ConnectionInterface:
 
     def data_monitor_handler(self, command, deserialized_data):
         if command == 0x4001: # low-bandwidth waveform metrics
-            self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_lb)
+            self.data_monitor_lb = self.write_data_monitor(
+                data=deserialized_data, file_dict=self.data_monitor_lb
+            )
             self.display_data(deserialized_data)
         elif command == 0x4002: # charge waveforms
             key = self._full_event_key(
@@ -415,7 +414,9 @@ class ConnectionInterface:
                 self.display_charge_event(deserialized_data)
             else:
                 print(deserialized_data)
-                self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_charge)
+                self.data_monitor_charge = self.write_data_monitor(
+                    data=deserialized_data, file_dict=self.data_monitor_charge
+                )
                 if deserialized_data["channel_number"] != self.tmp_ctr or len(deserialized_data["charge_samples"]) != 256:
                     print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["charge_samples"]))
                 self.tmp_ctr += 1
@@ -440,7 +441,9 @@ class ConnectionInterface:
                 )
                 self.display_light_event(deserialized_data)
             else:
-                self.write_data_monitor(data=deserialized_data, file_dict=self.data_monitor_light)
+                self.data_monitor_light = self.write_data_monitor(
+                    data=deserialized_data, file_dict=self.data_monitor_light
+                )
                 print("--> ", deserialized_data["channel_number"], ":", len(deserialized_data["light_samples"]))
                 self.display_light_event(deserialized_data)
         elif command == 0x4004:  # FEM headers for full event (buffer only until complete)
