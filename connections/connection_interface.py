@@ -190,8 +190,12 @@ class ConnectionInterface:
     def deserialize_telemetry(self, command, data):
         if command in list(self.deserializers.keys()) and len(data) > 0:
             dev_deserializer = self.deserializers[command]
-            dev_deserializer.deserialize(data)
-            return self.convert_metric_dict(dev_deserializer.get_metric_dict())
+            try:
+                dev_deserializer.deserialize(data)
+                return self.convert_metric_dict(dev_deserializer.get_metric_dict())
+            except Exception as e:
+                print(f"Warning could not decode packet {command}, threw error: {e}")
+                return None
         return data
 
     def display_charge_event(self, data):
@@ -488,14 +492,27 @@ class ConnectionInterface:
                 if not self.use_fake_hub:
                     command = telem["code"]
                     deserialized_data = self.deserialize_telemetry(command=command, data=telem["argv"])
+                    if deserialized_data is None:
+                        continue
                     if self.db_link is not None and command in list(self.command_to_db_table.keys()):
-                        print(f"WRITE to DB {command}")
-                        self.db_link.write_to_database(metrics=deserialized_data, table=self.command_to_db_table[command])
+                        try:
+                            print(f"WRITE to DB {command}")
+                            self.db_link.write_to_database(metrics=deserialized_data, table=self.command_to_db_table[command])
+                        except Exception as e:
+                            print(f"Warning MySQL write failed for {command}: {e}")
                     if command in [0x4001, 0x4002, 0x4003, 0x4004, 0x4005]:
-                        self.data_monitor_handler(command=command, deserialized_data=deserialized_data)
+                        if not isinstance(deserialized_data, dict):
+                            print(f"Warning skipping non-dict packet {command}")
+                            continue
+                        try:
+                            self.data_monitor_handler(command=command, deserialized_data=deserialized_data)
+                        except Exception as e:
+                            print(f"Warning data_monitor_handler failed for {command}: {e}")
                 else:
                     deserialized_data = self.deserialize_telemetry(command=telem["cmd_packet"].command,
                                                                    data=telem["cmd_packet"].arguments)
+                    if deserialized_data is None:
+                        continue
                     # Send data to Grafana
                     self.grafana_link.send_mqtt_message(telem["dev"], deserialized_data)
                     
