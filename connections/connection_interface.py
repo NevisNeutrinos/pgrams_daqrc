@@ -34,8 +34,13 @@ class ConnectionInterface:
         if interface not in ["TCP", "MQTT"]:
             raise ValueError(f"Invalid interface {interface}")
 
-        self.mqtt_broker_address = os.getenv("TPC_MQTT_IP") 
-        self.mqtt_broker_port = int(os.getenv("TPC_MQTT_PORT")) 
+        self.mqtt_broker_address = os.getenv("TPC_MQTT_IP")
+        mqtt_port = os.getenv("TPC_MQTT_PORT")
+        if not mqtt_port:
+            raise ValueError(
+                "TPC_MQTT_PORT is empty. Source setup_credentials.sh in this shell before --live."
+            )
+        self.mqtt_broker_port = int(mqtt_port) 
 
         self.serialized_data_queue = Queue()
         # Queues to hold the received messages streams
@@ -105,8 +110,12 @@ class ConnectionInterface:
                  for device_name in self.device_dict
         ]
 
-        self.monitor = monitor if monitor is not None else DqmWeb()
-        self.monitor.run()
+        # run_dqm.py --live already started Dash; do not bind the port twice.
+        if monitor is None:
+            self.monitor = DqmWeb()
+            self.monitor.run()
+        else:
+            self.monitor = monitor
 
         # Start the streaming
         t = Thread(target=self.deserialize_telemetry_args, daemon=True)

@@ -73,7 +73,11 @@ def _run_live(dqm: DqmWeb):
 def main():
     parser = argparse.ArgumentParser(description="pGRAMS DQM webpage")
     parser.add_argument("--live", action="store_true", help="MQTT live stream (needs networking stack)")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address; 127.0.0.1 is this machine only, 0.0.0.0 allows other hosts",
+    )
     parser.add_argument("--port", type=int, default=8051)
     parser.add_argument("--no-browser", action="store_true", help="do not open browser")
     args = parser.parse_args()

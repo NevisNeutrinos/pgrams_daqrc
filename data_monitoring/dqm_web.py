@@ -1402,6 +1402,9 @@ class DqmWeb:
             return figure
 
     def run(self, blocking: bool = False, open_browser: bool = False):
+        if getattr(self, "_server_started", False) and not blocking:
+            return
+        self._server_started = True
         url = f"http://{self.host}:{self.port}"
         if open_browser:
             threading.Timer(1.2, webbrowser.open, args=(url,)).start()
