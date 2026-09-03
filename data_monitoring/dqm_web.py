@@ -515,14 +515,14 @@ class DqmWeb:
                                 dcc.Input(
                                     id="flight-full-path",
                                     type="text",
-                                    placeholder="data_files/full_event_run_file.txt",
+                                    placeholder="empty = newest full_event_*.txt",
                                     style={"width": "300px", "fontSize": "13px"},
                                 ),
                                 html.Label("LBW file:", style={"fontSize": "13px", "marginLeft": "6px"}),
                                 dcc.Input(
                                     id="flight-lbw-path",
                                     type="text",
-                                    placeholder="data_files/lb_data_metrics_run_file.txt",
+                                    placeholder="empty = newest lb_data_metrics_*.txt",
                                     style={"width": "300px", "fontSize": "13px"},
                                 ),
                                 html.Button("Load", id="flight-load-btn", n_clicks=0),
@@ -1169,12 +1169,9 @@ class DqmWeb:
             fe = fe_resolved
             lbw = lbw_resolved
 
+            # Never write back into the path boxes. Empty = keep globbing newest.
             fe_path_out = no_update
             lbw_path_out = no_update
-            if not (fe_path or "").strip() and fe:
-                fe_path_out = fe
-            if not (lbw_path or "").strip() and lbw:
-                lbw_path_out = lbw
 
             if triggered == "flight-load-btn":
                 pause_out = ["pause"]
