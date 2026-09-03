@@ -883,6 +883,7 @@ def make_lbw_panel_figure(
     )
     fig.update_xaxes(**x_kw, showticklabels=False, row=1, col=1)
     fig.update_xaxes(**x_kw, title_text="ch", row=2, col=1)
+    major_grid, minor_grid = _lbw_grid_positions(n, is_light)
     for r in (1, 2):
         _add_lbw_grid_vlines(fig, major_grid, minor_grid, r)
 
